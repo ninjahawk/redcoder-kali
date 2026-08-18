@@ -616,7 +616,9 @@ def t_write_file(args, approve):
     exists = os.path.exists(path)
     verb = "Overwrite" if exists else "Create"
     if not approve(f"{verb} file {path}  ({len(content)} bytes)"):
-        raise ToolError("User declined the write.")
+        raise ToolError("User DENIED this write; the file was NOT created/changed. Do not "
+                        "retry the same write — ask the user what they want, or take a "
+                        "different approach.")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
@@ -633,7 +635,8 @@ def t_edit_file(args, approve):
     if data.count(old) > 1:
         raise ToolError("The 'old' text appears multiple times; add more context to make it unique.")
     if not approve(f"Edit file {path}  (replace {len(old)}→{len(new)} chars)"):
-        raise ToolError("User declined the edit.")
+        raise ToolError("User DENIED this edit; the file was NOT changed. Do not retry the "
+                        "same edit — ask the user what they want, or take a different approach.")
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(data.replace(old, new, 1))
     return f"Edited {path}."
@@ -712,6 +715,23 @@ _DANGEROUS_PATTERNS = [
     (r"/dev/(nvme|sd)[a-z0-9]", "reference to a raw disk device"),
     (r"\b(shutdown|reboot|poweroff|halt)\b", "power off / reboot the machine"),
     (r"\bapt\b.*\b(remove|purge)\b|\bdpkg\b.*-r", "remove system packages"),
+    # --- network state changes: RED tier. Touching the machine's connectivity, radios,
+    # kernel modules, namespaces, or firewall is never routine here — always confirm,
+    # even under auto-approve. This is the isolation boundary; treat it as sacred.
+    (r"\brfkill\b", "toggle a radio on/off (rfkill)"),
+    (r"\b(modprobe|insmod|rmmod)\b", "load/unload a kernel module"),
+    (r"\bnsenter\b", "enter another process's namespace (nsenter)"),
+    (r"\bunshare\b", "create a new namespace (unshare)"),
+    (r"\bip\s+link\s+set\b", "bring a network interface up/down (ip link set)"),
+    (r"\bip\s+(addr|address)\s+(add|del|flush)\b", "change an IP address (ip addr)"),
+    (r"\bip\s+route\s+(add|del|change|replace|flush)\b", "change routing (ip route)"),
+    (r"\bip\s+netns\b", "create/enter a network namespace (ip netns)"),
+    (r"\bnmcli\b.*\b(on|up|add|delete|modify|connect)\b", "change networking (nmcli)"),
+    (r"\b(ifconfig|iwconfig)\s+\S+\s+(up|down)\b", "bring an interface up/down"),
+    (r"\b(iptables|ip6tables|nft|nftables)\b", "change firewall rules"),
+    (r"\b(dhclient|wpa_supplicant|dhcpcd)\b", "bring up network connectivity"),
+    (r"\bsystemctl\b.*\b(NetworkManager|wpa_supplicant|networking|systemd-networkd)\b",
+     "control a networking service"),
 ]
 
 
@@ -918,7 +938,9 @@ def t_run_shell(args, approve):
     else:
         ok = approve(f"Run shell command:\n    {command}")
     if not ok:
-        raise ToolError("User declined the command.")
+        raise ToolError("User DENIED this command; it did NOT run and nothing changed. Do "
+                        "not retry the same command — ask the user, or take a different "
+                        "approach that doesn't need it.")
 
     if IS_WINDOWS:
         argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
