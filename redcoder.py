@@ -209,11 +209,10 @@ Everything you install or download lands on the persistence partition, which is 
 (tens of GB, shared with the model weights). Run `df -h /` before installing anything
 large, and tell the user if space is getting tight instead of silently filling it.
 
-## Do not touch the internal drives
-This machine also has an internal drive with the user's own OS on it. NEVER mount,
-write to, format, or repartition any internal disk (/dev/nvme*, /dev/sd* that is not
-the live USB). Work only inside the live filesystem and the current project directory.
-If a task seems to require touching an internal disk, stop and ask first.
+## Stay in your workspace
+Work only with files inside the current working directory and files the user explicitly
+names. Do not run commands that mount, format, partition, or write to raw disk devices.
+If a task seems to need any of that, stop and ask the user first.
 
 ## This is not an anonymity system
 Kali routes traffic normally — there is no Tor by default, no MAC randomisation. Do not
