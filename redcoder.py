@@ -106,6 +106,14 @@ CONSOLE_MAX_LINES = 400  # how many lines of a tool call/result to echo to the s
 REPEAT_NUDGE_AT = 2     # inject a "you already did this" nudge on this many identical calls
 REPEAT_STOP_AT = 3      # abort the turn on this many identical calls
 
+# Small models often signal "I am done" by inventing a fake tool (e.g. {"name":"stop"})
+# instead of just replying in plain text. _coerce_action rejects such names, so they land
+# in the "final answer" path; there we detect these and end the turn cleanly rather than
+# printing the raw json as the reply. (TOOL_NAMES itself is defined with the tool schema.)
+STOP_TOOL_WORDS = {"stop", "done", "finish", "finished", "end", "complete", "completed",
+                   "final", "final_answer", "answer", "respond", "reply", "none", "noop",
+                   "exit", "quit"}
+
 # Never persist anything. Belt-and-braces: disable Ollama's REPL history too
 # (we use the HTTP API so this is moot, but it costs nothing to be explicit).
 os.environ.setdefault("OLLAMA_NOHISTORY", "1")
@@ -1203,6 +1211,21 @@ def save_checkpoint(model, messages):
 # --------------------------------------------------------------------------- #
 #  Agent turn
 # --------------------------------------------------------------------------- #
+def _rejected_tool_name(content):
+    """If `content` is really a JSON tool-call whose name is NOT a real tool, return that
+    name; else None. Catches small models that 'call' a fake tool like stop/done/finish
+    instead of replying in plain text — _coerce_action rejects those, so they arrive here."""
+    for blob in _iter_json_objects(content):
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) \
+                and obj["name"] not in TOOL_NAMES:
+            return obj["name"]
+    return None
+
+
 def _fingerprint(action):
     """Stable hash of a tool call (name + arguments) for loop detection."""
     try:
@@ -1219,6 +1242,7 @@ def agent_turn(model, messages, approve):
     conversation kept, so you can interject new information and continue."""
     call_counts = {}     # tool-call fingerprint -> how many times seen this turn
     forced_final = 0     # how many times we've told it to stop and answer
+    bad_tool_tries = 0   # how many times it named a nonexistent tool this turn
     for _ in range(MAX_STEPS):
         maybe_compact(model, messages)
         printer = StreamPrinter()
@@ -1234,7 +1258,26 @@ def agent_turn(model, messages, approve):
         action = extract_action(content, native)
 
         if not action:
-            # If we suppressed the reply as a tool call but it wasn't one, show it now.
+            # The model may have "called" a fake tool (e.g. {"name":"stop"}) instead of
+            # replying in plain text. _coerce_action rejected it, so it's here as content.
+            fake = _rejected_tool_name(content)
+            if fake is not None:
+                if fake.lower().strip() in STOP_TOOL_WORDS:
+                    # It meant "I'm done" — end cleanly, don't print the raw json.
+                    print(dim("  (done)"))
+                    return
+                # An unknown, non-stop tool name. Correct it a couple of times, then stop.
+                bad_tool_tries += 1
+                if bad_tool_tries <= 2:
+                    print(yellow(f"  ⚠ no tool named '{fake}' — asking for a real answer."))
+                    messages.append({"role": "user", "content":
+                        f"There is no tool named '{fake}'. The only tools are: "
+                        f"{', '.join(sorted(TOOL_NAMES))}. If you are finished, reply in "
+                        "plain text with NO json. Otherwise call one of the real tools."})
+                    continue
+                print(dim("  (done)"))
+                return
+            # A genuine plain-text answer.
             if (printer.mode == "tool" and not printer.displayed) or not printer.printed:
                 print(render_markdown(content.strip()))
             return
