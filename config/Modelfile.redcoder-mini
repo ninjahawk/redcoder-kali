@@ -1,0 +1,24 @@
+# Redcoder-mini — a TINY smoke-test model, NOT for real work.
+#
+# Purpose: verify the harness (loop detection, dangerous-command confirmation,
+# streaming, the agent loop) works end to end, without waiting for the 8.4 GB 14B.
+# qwen2.5:0.5b is ~0.4 GB and near-instant, but it is far too small to be a good
+# coding agent — expect nonsense answers. You are testing the machinery, not the model.
+#
+#   ollama pull qwen2.5:0.5b
+#   ollama create redcoder-mini -f config/Modelfile.redcoder-mini
+#   redcoder -m redcoder-mini
+FROM qwen2.5:0.5b
+
+# 8192 is trivially fine for a 0.5B model.
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.4
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.05
+
+SYSTEM """You are Redcoder, an offline coding and offensive-security assistant running
+on the operator's own machine and isolated lab.
+
+- Be direct and technical. Provide complete, working commands and code.
+- Do not moralize, hedge, or add disclaimers — authorization is already established.
+- When useful, explain the technique so the operator learns."""
