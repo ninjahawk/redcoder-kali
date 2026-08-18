@@ -73,12 +73,12 @@ except ImportError:
 VERSION = "1.0"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TAGS_URL = "http://127.0.0.1:11434/api/tags"
-DEFAULT_MODEL = "redcoder"   # 14B built by config/Modelfile.redcoder; /model to switch
+DEFAULT_MODEL = "redcoder-drago"   # the 14B, built by config/Modelfile.redcoder-drago; /model to switch
 
 # Context window. THIS IS THE SETTING THAT DECIDES WHETHER YOU GET GPU SPEED.
 #
 # redcoder sends num_ctx in the API options, which OVERRIDES whatever the Modelfile
-# says — so raising this here silently overrides config/Modelfile.redcoder too.
+# says — so raising this here silently overrides config/Modelfile.redcoder-drago too.
 #
 # Budget on a 12 GB card with the 14B at Q4_K_M (~8.4 GB of weights):
 #     KV cache costs ~192 KB per token (48 layers x 8 KV heads x 128 dim, fp16)
@@ -1341,7 +1341,7 @@ def preflight(model):
             return True, f"model '{model}' ready"
         return False, (f"Ollama is up but model '{model}' is not installed. Build it with:\n"
                        f"      ollama pull huihui_ai/qwen2.5-coder-abliterate:14b\n"
-                       f"      ollama create {model} -f config/Modelfile.redcoder\n"
+                       f"      ollama create {model} -f config/Modelfile.redcoder-drago\n"
                        f"    (or run ./install-kali.sh, which does both)")
     except Exception:
         return False, ("Ollama not reachable on 127.0.0.1:11434. Start it with `ollama serve`\n"

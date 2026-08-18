@@ -1,4 +1,4 @@
-# Redcoder — local, offline coding agent model.
+# redcoder-drago — the real 14B model (desktop/12GB-GPU only).
 # Derived from an abliterated (refusal-removed) coder model, tuned for a 12 GB RTX 5070.
 FROM huihui_ai/qwen2.5-coder-abliterate:14b
 

@@ -11,7 +11,7 @@
 set -euo pipefail
 
 BASE_MODEL="huihui_ai/qwen2.5-coder-abliterate:14b"
-MODEL_NAME="redcoder"
+MODEL_NAME="redcoder-drago"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 say()  { printf '\n\033[1;31m==>\033[0m \033[1m%s\033[0m\n' "$1"; }
@@ -100,8 +100,8 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-say "Building the '${MODEL_NAME}' model from config/Modelfile.redcoder"
-ollama create "$MODEL_NAME" -f "$HERE/config/Modelfile.redcoder"
+say "Building the '${MODEL_NAME}' model from config/Modelfile.redcoder-drago"
+ollama create "$MODEL_NAME" -f "$HERE/config/Modelfile.redcoder-drago"
 ok "created '${MODEL_NAME}'"
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +128,6 @@ cat <<EOF
     PROCESSOR should read 100% GPU. Anything mentioning CPU means the model
     spilled out of VRAM and you will be several times slower. If that happens,
     lower NUM_CTX in redcoder.py and rebuild with:
-        ollama create $MODEL_NAME -f config/Modelfile.redcoder
+        ollama create $MODEL_NAME -f config/Modelfile.redcoder-drago
 
 EOF

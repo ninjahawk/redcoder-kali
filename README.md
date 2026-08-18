@@ -20,7 +20,7 @@ redcoder
 
 `install-kali.sh` is idempotent — re-run it any time. It checks disk space, installs
 Ollama if missing, configures the server for a q8_0 KV cache, pulls the base model,
-builds the `redcoder` model, and installs the launcher.
+builds the `redcoder-drago` model, and installs the launcher.
 
 ---
 
@@ -28,7 +28,7 @@ builds the `redcoder` model, and installs the launcher.
 
 | | Windows build | This build |
 |---|---|---|
-| Default model | `redcoder-max` (30B, 19 GB) | `redcoder` (14B, 8.4 GB) |
+| Default model | `redcoder-max` (30B, 19 GB) | `redcoder-drago` (14B, 8.4 GB) |
 | `NUM_CTX` | 32768 | 8192 |
 | `MAX_STEPS` | 200 | 25 |
 | `run_shell` | PowerShell | bash |
@@ -115,7 +115,7 @@ roughly **192 KB per token** (48 layers x 8 KV heads x 128 dim, fp16):
 Expect roughly **50–60 tok/s** when it's fully GPU-resident.
 
 **A trap worth knowing:** `redcoder.py` sends `num_ctx` in its API options, and that
-**overrides whatever `config/Modelfile.redcoder` says.** Changing the Modelfile alone
+**overrides whatever `config/Modelfile.redcoder-drago` says.** Changing the Modelfile alone
 will not do what you expect — change `NUM_CTX` in `redcoder.py` too.
 
 ### The q8_0 KV cache
@@ -205,7 +205,7 @@ Serves a chat UI on `http://127.0.0.1:7331`, loopback only.
 redcoder.py                     the agent (stdlib only, no pip installs)
 redcoder                        launcher; symlinked to /usr/local/bin by the installer
 install-kali.sh                 one-time setup, idempotent
-config/Modelfile.redcoder       14B build for a 12 GB card
+config/Modelfile.redcoder-drago  14B build for a 12 GB card (model name: redcoder-drago)
 config/Modelfile.redcoder-max   30B build — will NOT fit a 12 GB card, kept for reference
 server.py + webui/              optional local web chat
 docs/README.md                  original project documentation
