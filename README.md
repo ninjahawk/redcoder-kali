@@ -30,13 +30,49 @@ builds the `redcoder` model, and installs the launcher.
 |---|---|---|
 | Default model | `redcoder-max` (30B, 19 GB) | `redcoder` (14B, 8.4 GB) |
 | `NUM_CTX` | 32768 | 8192 |
+| `MAX_STEPS` | 200 | 25 |
 | `run_shell` | PowerShell | bash |
-| System prompt | "Windows PC" | "Kali Linux machine" + Kali briefing (below) |
+| System prompt | "Windows PC" | small-model rewrite + Kali briefing (below) |
+| Loop detection | none | fingerprint + nudge + hard-stop |
+| Dangerous-command backstop | none | confirm-on-dangerous, even in auto mode |
 | Voice (hold-Space) | works | disabled — Windows-only API |
 | Launcher | `redcoder.cmd` | `redcoder` + `install-kali.sh` |
 
 The Python file still detects the platform at runtime, so it also runs correctly on
 Windows — it just defaults to settings that suit the USB.
+
+## Making a small model behave
+
+A 14B is fast but cannot be reasoned with like a frontier model. Two failure modes show
+up, and both are handled here — in code, not just by asking nicely in the prompt.
+
+**Repetition — calling the same tool with the same arguments over and over.** Every tool
+call is fingerprinted (`name` + `arguments`). On the 2nd identical call the harness skips
+execution and injects a nudge ("you already ran this, use the result or answer"); on the
+3rd it stops the turn and forces a final answer. This is the documented fix for small-model
+loops — detect the repeat in the harness rather than trusting the model to notice.
+
+A related cause was compaction: with a small context, compacting at 75% fired constantly,
+and every compaction summarized away the specific tool results the model needed — so it
+redid the work. Compaction now waits until 85%, keeps more recent history verbatim
+(`KEEP_RECENT = 8`), and the summary is required to list "ACTIONS ALREADY COMPLETED".
+
+**Aimless wandering — running tools with no goal, just because they exist.** The system
+prompt was rewritten short and imperative for a small model. Its first rule is now *"Do
+the LEAST work that answers the request, then STOP,"* every tool call must have a stated
+purpose, and it must reuse earlier observations instead of re-fetching. `MAX_STEPS` is
+cut from 200 to 25 so a wandering model can't do much damage before the turn ends.
+
+**Destructive commands.** Because a small model will eventually emit something dangerous,
+`run_shell` matches each command against a pattern list (`rm -rf`, `mkfs`, `dd of=`,
+`mount`, writes to `/dev/nvme*` or `/dev/sd*`, `shutdown`, fork bombs, `apt purge`, ...).
+A match forces an explicit confirmation **even in auto-approve mode**, defaulting to No.
+It is a guardrail against mistakes, not a security boundary. Normal Kali tools (nmap,
+grep, cat, ...) are unaffected. Edit `_DANGEROUS_PATTERNS` in `redcoder.py` to tune it.
+
+These are tuning knobs, not guarantees — a small model still needs supervision. The
+`--dangerously-skip-permissions` flag still bypasses ordinary write/edit prompts, but the
+dangerous-command confirmation above ignores it by design.
 
 ### The Kali briefing
 

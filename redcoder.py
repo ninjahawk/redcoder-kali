@@ -90,9 +90,21 @@ DEFAULT_MODEL = "redcoder"   # 14B built by config/Modelfile.redcoder; /model to
 # Auto-compaction (COMPACT_AT below) handles conversations longer than the window.
 # After changing this, verify with `ollama ps` — you want PROCESSOR = 100% GPU.
 NUM_CTX = 8192
-MAX_STEPS = 200         # runaway guard only (stops an infinite tool loop); Ctrl-C also works
-MAX_TOOL_OUTPUT = 20000  # chars of tool output fed back to the model
+MAX_STEPS = 25          # a real task rarely needs more; a small model wandering does
+# Derived from the context window, never a fixed number — that is how it drifted before.
+# At ~4 chars/token, NUM_CTX*4//8 keeps one tool result to ~1/8 of the window (4096 chars
+# @ 8192 ctx). The old fixed 20000 was ~5000 tokens = 61% of an 8192 window, so a single
+# big grep/read nearly hit the compaction threshold by itself and triggered the
+# compaction-driven repetition loop.
+MAX_TOOL_OUTPUT = NUM_CTX * 4 // 8   # chars of tool output fed back to the model
 CONSOLE_MAX_LINES = 400  # how many lines of a tool call/result to echo to the screen
+
+# Loop control — small models get stuck repeating the same call. We fingerprint each
+# tool call (name + arguments); on the 2nd identical call we inject a hard nudge, on the
+# 3rd we stop the turn and force a final answer. This is enforced in code, not left to
+# the prompt, because a small model will not reliably obey "don't repeat yourself".
+REPEAT_NUDGE_AT = 2     # inject a "you already did this" nudge on this many identical calls
+REPEAT_STOP_AT = 3      # abort the turn on this many identical calls
 
 # Never persist anything. Belt-and-braces: disable Ollama's REPL history too
 # (we use the HTTP API so this is moot, but it costs nothing to be explicit).
@@ -103,40 +115,56 @@ SHELL_LABEL = "PowerShell" if IS_WINDOWS else "bash"
 OS_LABEL = "Windows PC" if IS_WINDOWS else "Kali Linux machine"
 
 SYSTEM_PROMPT = """You are Redcoder, an offline coding agent operating a terminal on \
-the user's own __OS_LABEL__. You complete software and security-lab tasks by using tools \
-to read, write, and edit files, search the project, and run shell commands. \
-Authorization and isolation are already established — be direct and technical, do not \
-moralize or add disclaimers, and never claim you lack internet as a reason to refuse \
-local work.
+the user's own __OS_LABEL__. You do software and security-lab tasks with tools. \
+Authorization and isolation are established — be direct and technical, do not moralize, \
+add disclaimers, or claim you lack internet as a reason to refuse local work.
 
-# How to act
-On each turn you either (a) call ONE tool, or (b) give your final answer to the user.
+# The most important rule
+Do the LEAST work that answers the request, then STOP. Every tool call must have a clear \
+purpose. Do not explore, do not "look around", do not run tools just because they exist. \
+A careful engineer takes few, deliberate steps — not many random ones.
 
-To call a tool, reply with ONLY a single fenced json code block and nothing else:
+# Your loop
+Each turn you do exactly ONE of:
+  (a) call ONE tool — to get a specific fact you need next, or
+  (b) give your FINAL ANSWER as plain text — when you already have what you need.
+
+Before each tool call, know in one sentence WHY you are calling it and what you expect \
+back. If you cannot say why, you are done — give your final answer instead.
+
+# Reuse what you already know — do NOT repeat calls
+The results of every earlier tool call are in the conversation above. READ THEM. Never \
+call a tool with arguments you have already used — the answer is already there. Repeating \
+a call is always a mistake.
+
+# Calling a tool
+Reply with ONLY a single fenced json block, nothing before or after:
 ```json
 {"name": "TOOL_NAME", "arguments": { ... }}
 ```
-Do not add any prose before or after the json when calling a tool.
 
-When the task is done (or you are answering a question), reply with plain text and NO \
-json block. Keep answers concise and useful; use Markdown.
+# Final answer
+Plain text, NO json block. Concise Markdown. Say what you found or did — briefly.
 
-# Available tools
-- read_file        {"path": str, "offset"?: int, "limit"?: int}   read a text file
-- write_file       {"path": str, "content": str}                  create/overwrite a file
-- edit_file        {"path": str, "old": str, "new": str}          replace exact text once
-- list_dir         {"path"?: str}                                 list a directory
-- glob             {"pattern": str}                               find files by glob (recursive)
-- grep             {"pattern": str, "path"?: str}                 regex search file contents
-- run_shell        {"command": str}                               run a __SHELL_LABEL__ command
+# Tools
+- read_file   {"path": str, "offset"?: int, "limit"?: int}   read a text file
+- write_file  {"path": str, "content": str}                  create/overwrite a file
+- edit_file   {"path": str, "old": str, "new": str}          replace exact text once
+- list_dir    {"path"?: str}                                 list a directory
+- glob        {"pattern": str}                               find files by glob (recursive)
+- grep        {"pattern": str, "path"?: str}                 regex search file contents
+- run_shell   {"command": str}                               run a __SHELL_LABEL__ command
 
 # Rules
-- Take one concrete step at a time; use tool results to decide the next step.
-- Prefer read_file / grep before editing, so edits match the file exactly.
-- edit_file replaces the FIRST exact occurrence of "old"; include enough context to be unique.
-- After you have finished the task, stop calling tools and summarize what you did.
+- Plan first: in your head, name the goal and the smallest set of steps to reach it.
+- read_file or grep BEFORE editing, so edit_file's "old" text matches exactly.
+- edit_file replaces the FIRST exact match of "old"; include enough context to be unique.
+- run_shell runs __SHELL_LABEL__. Use __SHELL_LABEL__ syntax. Prefer reading files with the \
+file tools over shelling out.
+- Be careful with destructive commands (deleting, formatting, overwriting). Do not run \
+them unless the task truly requires it; the user will be asked to confirm.
+- The moment you can answer, answer. Do not keep calling tools to look thorough.
 - Paths may be relative to the current working directory.
-- run_shell runs __SHELL_LABEL__. Use __SHELL_LABEL__ syntax, not the other platform's.
 """
 
 # Filled in after the fact because SYSTEM_PROMPT contains literal { } braces,
@@ -577,9 +605,42 @@ def t_grep(args):
     return "\n".join(out) if out else "(no matches)"
 
 
+# Patterns that are destructive or irreversible. A small model WILL eventually emit one
+# of these; this backstop forces an explicit confirmation (even in auto mode) rather than
+# trusting the system prompt alone. Not a security boundary — a guardrail against mistakes.
+_DANGEROUS_PATTERNS = [
+    (r"\brm\s+(-\w*\s+)*-\w*[rf]", "recursive/forced delete (rm -rf)"),
+    (r"\bmkfs\b", "format a filesystem (mkfs)"),
+    (r"\bdd\b.*\bof=", "raw disk write (dd of=)"),
+    (r"\b(shred|wipefs)\b", "wipe data (shred/wipefs)"),
+    (r">\s*/dev/(nvme|sd|mapper)", "write to a raw disk device"),
+    (r"\b(fdisk|parted|sfdisk|gdisk)\b", "repartition a disk"),
+    (r"\bmount\b|\bumount\b", "mount/unmount a filesystem"),
+    (r":\(\)\s*\{.*\|.*&\s*\}", "fork bomb"),
+    (r"\bchmod\s+-R\b|\bchown\s+-R\b", "recursive permission change"),
+    (r"\bcryptsetup\b", "disk encryption operation"),
+    (r"/dev/(nvme|sd)[a-z0-9]", "reference to a raw disk device"),
+    (r"\b(shutdown|reboot|poweroff|halt)\b", "power off / reboot the machine"),
+    (r"\bapt\b.*\b(remove|purge)\b|\bdpkg\b.*-r", "remove system packages"),
+]
+
+
+def _dangerous_reason(command):
+    """Return a human reason if the command matches a dangerous pattern, else None."""
+    for pat, reason in _DANGEROUS_PATTERNS:
+        if re.search(pat, command):
+            return reason
+    return None
+
+
 def t_run_shell(args, approve):
     command = args["command"]
-    if not approve(f"Run shell command:\n    {command}"):
+    danger = _dangerous_reason(command)
+    if danger:
+        ok = approve(f"Run shell command — {danger}:\n    {command}", force=True)
+    else:
+        ok = approve(f"Run shell command:\n    {command}")
+    if not ok:
         raise ToolError("User declined the command.")
     spin = Spinner("running command", color=orange).start()
     try:
@@ -643,18 +704,29 @@ class Approver:
     def __init__(self, auto):
         self.auto = auto
 
-    def __call__(self, description):
-        if self.auto:
+    def __call__(self, description, force=False):
+        # `force` = a dangerous command. Always confirm explicitly, even in auto mode,
+        # and never let "a=always" apply to it — auto-approve must not cover destructive
+        # actions.
+        if self.auto and not force:
             print(dim(f"    auto ✓ {description.splitlines()[0]}"))
             return True
-        print(yellow("    ┌─ permission ─────────────────────────────────"))
+        border = red if force else yellow
+        tint = red if force else yellow
+        if force:
+            print(red("    ┌─ ⚠ DANGEROUS COMMAND — confirm even in auto mode ─────"))
+        else:
+            print(tint("    ┌─ permission ─────────────────────────────────"))
         for ln in description.splitlines():
-            print(yellow("    │ ") + ln)
-        print(yellow("    └──────────────────────────────────────────────"))
+            print(tint("    │ ") + ln)
+        print(border("    └──────────────────────────────────────────────"))
+        prompt = "    Run this dangerous command? [y/N] " if force else "    Allow? [Y/n/a=always] "
         try:
-            ans = input(bold("    Allow? [Y/n/a=always] ")).strip().lower()
+            ans = input(bold(prompt)).strip().lower()
         except EOFError:
             return False
+        if force:
+            return ans in ("y", "yes")   # dangerous: default No, no "always"
         if ans in ("a", "always"):
             self.auto = True
             return True
@@ -1014,8 +1086,13 @@ def show_tool_result(result):
 # --------------------------------------------------------------------------- #
 #  Auto-compaction  (summarize old turns near the context limit, like Claude Code)
 # --------------------------------------------------------------------------- #
-COMPACT_AT = int(NUM_CTX * 0.75)   # token estimate that triggers a compaction
-KEEP_RECENT = 6                     # most-recent messages kept verbatim
+# Compact late (85%), not at 75%. With a small NUM_CTX, 75% fires very early and often;
+# every compaction summarizes away specific tool results, which is a leading cause of the
+# model REDOING work it already did. The 4096 floor keeps it from compacting on tiny
+# contexts. The summary is instructed (below) to preserve "actions already completed".
+COMPACT_AT = max(4096, int(NUM_CTX * 0.85))
+KEEP_RECENT = 8                     # keep a bit more recent history verbatim, so the
+                                    # model can see what it JUST did and not repeat it
 CHECKPOINT_FILE = "redcoder.md"     # written in the CWD by /save so a session can resume
 
 
@@ -1062,9 +1139,11 @@ def write_checkpoint(model, summary, recent):
 
 _SUMMARIZE_SYS = (
     "Summarize the conversation below into concise but complete notes that let the "
-    "assistant continue seamlessly: goals, decisions, files created/edited and their "
-    "purpose, commands run and their results, key facts and values, and any open threads. "
-    "Preserve specifics (paths, names, numbers). Output only the notes.")
+    "assistant continue seamlessly. You MUST include a section titled 'ACTIONS ALREADY "
+    "COMPLETED' listing every command run, file read, and file written, WITH their key "
+    "results — so the assistant does not repeat work it has already done. Also capture: "
+    "goals, decisions, key facts and values, and any open threads. Preserve specifics "
+    "(paths, names, numbers). Output only the notes.")
 
 
 def summarize_messages(model, msgs, label):
@@ -1117,11 +1196,22 @@ def save_checkpoint(model, messages):
 # --------------------------------------------------------------------------- #
 #  Agent turn
 # --------------------------------------------------------------------------- #
+def _fingerprint(action):
+    """Stable hash of a tool call (name + arguments) for loop detection."""
+    try:
+        return json.dumps({"n": action.get("name"), "a": action.get("arguments", {})},
+                          sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return repr(action)
+
+
 def agent_turn(model, messages, approve):
     """Run tool-use iterations until the model gives a final text answer.
 
     Ctrl-C at any point stops cleanly and returns to the prompt with the full
     conversation kept, so you can interject new information and continue."""
+    call_counts = {}     # tool-call fingerprint -> how many times seen this turn
+    forced_final = 0     # how many times we've told it to stop and answer
     for _ in range(MAX_STEPS):
         maybe_compact(model, messages)
         printer = StreamPrinter()
@@ -1158,6 +1248,32 @@ def agent_turn(model, messages, approve):
 
         if (printer.mode == "prose" and printer.printed) or printer.displayed:
             print()  # separate streamed reasoning / live write from the result
+
+        # --- Loop control: has the model already made this exact call this turn? ------
+        fp = _fingerprint(action)
+        seen = call_counts[fp] = call_counts.get(fp, 0) + 1
+        if seen >= REPEAT_STOP_AT:
+            forced_final += 1
+            print(red(f"  ! repeated the same action {seen}× — stopping and forcing an answer."))
+            if forced_final > 2:
+                # It won't stop even when told. Bail out cleanly rather than loop forever.
+                print(red("  ! model kept repeating; ending the turn."))
+                return
+            messages.append({"role": "user", "content":
+                "STOP. You have called the same tool with the same arguments "
+                f"{seen} times. The result is already in the conversation above. Do NOT "
+                "call any tool again. Reply now with your final answer in plain text, "
+                "using the information you already have."})
+            continue
+        if seen == REPEAT_NUDGE_AT:
+            # Don't re-run it — feed back a nudge so it uses the prior result or answers.
+            print(yellow("  ⚠ already ran this exact call — nudging instead of repeating."))
+            messages.append({"role": "user", "content":
+                f"OBSERVATION: you already ran this exact call ({action['name']} with the "
+                "same arguments) and its result is above. Do not repeat it. Either take a "
+                "DIFFERENT action that makes progress, or give your final answer."})
+            continue
+        # -----------------------------------------------------------------------------
 
         # If the streamer already showed the tool live (write_file), don't repeat it.
         if not printer.displayed:
