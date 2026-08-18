@@ -141,27 +141,35 @@ A careful engineer takes few, deliberate steps — not many random ones.
 # Your loop
 Each turn you do exactly ONE of:
   (a) call ONE tool — to get a specific fact you need next, or
-  (b) give your FINAL ANSWER as plain text — when you already have what you need, or when \
-      the user is just talking to you.
+  (b) give your FINAL ANSWER as plain text — when the task is done, or the user is just
+      talking to you.
 
-Before each tool call, know in one sentence WHY you are calling it and what you expect \
-back. If you cannot say why, you are done — give your final answer instead.
+# Think before each step — THIS IS HOW YOU REASON
+You are not smart enough to hold the whole task in your head, so think ON PAPER, one step
+at a time. Every tool call MUST include a "thought" that does two things in order:
+  1. LOOK BACK: what did the most recent result tell you? (or, on your first step, what
+     is the goal?)
+  2. LOOK FORWARD: given that, what is the single next step, and why this action?
+This is the most important habit. A good thought reads like: "The file listing showed
+config.py but no tests/, so the project has no tests yet; I'll read config.py next to see
+what it does." Do this every time — it keeps you logical and stops you from wandering.
 
 # Reuse what you already know — do NOT repeat calls
-The results of every earlier tool call are in the conversation above. READ THEM. Never \
-call a tool with arguments you have already used — the answer is already there. Repeating \
-a call is always a mistake.
+The results of every earlier tool call are in the conversation above. READ THEM in your
+"thought" before acting. Never call a tool with arguments you have already used — the
+answer is already there. Repeating a call is always a mistake.
 
 # Calling a tool
-Reply with ONLY a single fenced json block, nothing before or after. Include a short
-"why" field — ONE plain sentence saying what this call is for (it is shown to the user):
+Reply with ONLY a single fenced json block, nothing before or after:
 ```json
-{"name": "TOOL_NAME", "arguments": { ... }, "why": "what I'm doing and why, in one line"}
+{"thought": "look back at the last result, then say the next step and why", "name": "TOOL_NAME", "arguments": { ... }}
 ```
-Keep the json valid — the "why" is one short string, still inside the single json block.
+Keep the json valid — "thought" is one short string, inside the single json block.
 
-# Final answer
-Plain text, NO json block. Concise Markdown. Say what you found or did — briefly.
+# Final answer — and checking you are actually done
+Before you finish, CHECK: did you do everything the user asked? If anything is missing,
+do NOT stop — take the next step instead. When it is truly complete, reply in plain text
+(NO json block), briefly: what you did, and confirm the task is done. Concise Markdown.
 
 # Tools
 - read_file   {"path": str, "offset"?: int, "limit"?: int}   read a text file
@@ -379,17 +387,18 @@ def _coerce_action(obj):
     if name in TOOL_NAMES:
         args = obj.get("arguments")
         if args is None:
-            args = {k: v for k, v in obj.items() if k not in ("name", "why")}
+            args = {k: v for k, v in obj.items() if k not in ("name", "thought", "why")}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
             except Exception:
                 args = {}
         act = {"name": name, "arguments": args if isinstance(args, dict) else {}}
-        # Optional one-line narration the model may include; shown before the call.
-        why = obj.get("why")
-        if isinstance(why, str) and why.strip():
-            act["why"] = why.strip()
+        # The model's step-by-step reasoning, shown before the call. Prefer "thought";
+        # accept "why" as a fallback so older phrasings still surface something.
+        thought = obj.get("thought") or obj.get("why")
+        if isinstance(thought, str) and thought.strip():
+            act["thought"] = thought.strip()
         return act
     return None
 
@@ -1331,10 +1340,10 @@ def agent_turn(model, messages, approve):
             continue
         # -----------------------------------------------------------------------------
 
-        # Narration: show the model's one-line "why" before the action (Claude-Code feel).
-        why = action.pop("why", None)
-        if why:
-            print(cyan("  » ") + dim(why))
+        # Show the model's step-by-step reasoning before the action.
+        thought = action.pop("thought", None)
+        if thought:
+            print(cyan("  » ") + dim(thought))
 
         # If the streamer already showed the tool live (write_file), don't repeat it.
         if not printer.displayed:
