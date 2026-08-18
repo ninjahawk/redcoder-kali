@@ -1863,23 +1863,18 @@ def main(argv):
         print(red(BANNER))
     else:
         print("\n" + bold(red("  R E D C O D E R")) + "\n")
-    print(dim("  offline coding agent · local model · nothing logged to disk"
-              if w >= 62 else "  offline · local · nothing logged"))
     ok, status = preflight(model)
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
     if _NET_MODE == "lab":
         ok, msg = activate_lab()
-        if ok:
-            print(green("  " + msg))
-        else:
-            print(red("  ⚠ lab mode unavailable: " + msg))
-            print(red("  → falling back to SEALED (airgap)."))
+        if not ok:
+            print(red("  lab mode unavailable: " + msg))
+            print(red("  falling back to Airgapped."))
             _NET_MODE = "sealed"
     if _NET_MODE == "sealed":
-        print(green("  🔒 SEALED — shell commands have NO network"
-                    + ("" if w < 62 else " (airgap; enforced by namespace)")))
+        print(green("  Airgapped"))
         if IS_WINDOWS:
             print(yellow("  ⚠ isolation is Linux-only; not enforced on Windows"))
         else:
@@ -1888,10 +1883,9 @@ def main(argv):
                 print(red("  ⚠ no firejail/unshare found — shell commands will REFUSE "
                           "to run until one is installed (sudo apt install -y firejail)"))
     elif _NET_MODE == "lab":
-        print(green("  🧪 LAB — offline lab net"
-                    + ("" if w < 62 else f"; reaches {LAB_SUBNET} targets, no internet")))
+        print(green("  Lab"))
     else:
-        print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
+        print(yellow("  Online"))
     if _VOICE:
         print(pink("  🎤 hold ") + bold(pink("Space")) + pink(" at an empty prompt to talk")
               + dim("  (offline Whisper)"))
@@ -1961,45 +1955,40 @@ def main(argv):
                 arg = rest.strip().lower()
                 if arg in ("", "status"):
                     if _NET_MODE == "sealed":
-                        _, backend, err = _net_prefix("sealed")
-                        how = ("Windows: NOT enforced" if backend == "windows"
-                               else "no sandbox — commands refuse to run" if err
-                               else f"airgap via {backend}")
-                        print(green(f"  🔒 SEALED — no network  ({how})"))
+                        print(green("  Airgapped"))
                     elif _NET_MODE == "lab":
-                        print(green(f"  🧪 LAB — offline lab net, reaches {LAB_SUBNET}, no internet"))
+                        print(green("  Lab"))
                     else:
-                        print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
-                    print(grey("  /net sealed = airgap  ·  /net lab = offline lab  ·  /net online = internet"))
+                        print(yellow("  Online"))
+                    print(grey("  /net sealed · /net lab · /net online"))
                 elif arg in ("sealed", "offline", "off", "airgap"):
                     if _NET_MODE == "sealed":
-                        print(dim("  already SEALED.")); continue
+                        print(dim("  already Airgapped.")); continue
                     _NET_MODE = "sealed"
                     messages.append({"role": "system", "content":
                         "NETWORK MODE CHANGED to SEALED (airgap): shell commands now have NO "
                         "network at all. Do local work only."})
-                    print(green("  🔒 now SEALED — shell commands have NO network."))
+                    print(green("  Airgapped"))
                 elif arg in ("lab", "offline-lab"):
                     if _NET_MODE == "lab":
-                        print(dim("  already in LAB mode.")); continue
+                        print(dim("  already Lab.")); continue
                     ok, msg = activate_lab()
                     if not ok:
-                        print(red("  ✗ " + msg)); continue
+                        print(red("  " + msg)); continue
                     _NET_MODE = "lab"
                     messages.append({"role": "system", "content":
                         f"NETWORK MODE CHANGED to LAB: shell commands reach the isolated "
                         f"offline lab network ({LAB_SUBNET}) only — no internet. Aim tools at "
                         f"{LAB_SUBNET}, not public hosts."})
-                    print(green("  🧪 " + msg))
+                    print(green("  Lab"))
                 elif arg in ("online", "on"):
                     if _NET_MODE == "online":
-                        print(dim("  already ONLINE.")); continue
+                        print(dim("  already Online.")); continue
                     _NET_MODE = "online"
                     messages.append({"role": "system", "content":
                         "NETWORK MODE CHANGED to ONLINE: shell commands can now reach the "
                         "network. Still prefer local work; go online only when required."})
-                    print(yellow("  🌐 now ONLINE — shell commands CAN reach the internet."))
-                    print(red("  ⚠ the offline guarantee is off until you /net sealed again."))
+                    print(yellow("  Online"))
                 else:
                     print(yellow("  usage: /net [status|sealed|lab|online]"))
                 continue
