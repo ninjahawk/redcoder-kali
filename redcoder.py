@@ -11,9 +11,9 @@ against a 12 GB GPU. See README.md for the one-time setup.
 
 Design goals:
   * OFFLINE   — the agent talks only to 127.0.0.1:11434 (local Ollama). Shell
-                commands run in one of two DELIBERATE network modes: SEALED
-                (default — commands have NO network, enforced by a sandbox) or
-                ONLINE (opt in with --online / /net online). See README.md.
+                commands run in one of three DELIBERATE network modes: Airgapped
+                (default — no network at all), Lab (isolated offline lab net), or
+                Online (opt in with --online / /net online). See README.md.
   * NO LOGS   — writes nothing to disk except the files YOU ask it to change.
                 No transcript, no history file, no telemetry. Memory-only.
   * SELF-CONTAINED — Python standard library only. No pip installs.
@@ -27,8 +27,8 @@ Flags (Claude-Code style):
     -y, --auto,
     --dangerously-skip-permissions  auto-approve ALL writes/edits/shell — no prompts
     -m, --model NAME                use a different Ollama model (default: redcoder)
-    --sealed, --offline             SEALED (default): shell commands have NO network
-                                    at all (airgap) — enforced by a namespace
+    --sealed, --airgap, --offline   Airgapped (default): shell commands have NO
+                                    network at all — enforced by a namespace
     --lab                           OFFLINE LAB: shell commands reach an isolated lab
                                     network (fake targets) but NOT the internet;
                                     verified before use (needs ./lab-net.sh up)
@@ -270,8 +270,8 @@ def build_system():
     does not waste steps attempting work the mode won't allow."""
     if _NET_MODE == "sealed":
         net = ("# Network access\n"
-               "SEALED (airgap) mode: shell commands have NO network at all — not even a "
-               "LAN. Any attempt to reach a host, the internet, or a lab target WILL fail. "
+               "Airgapped mode: shell commands have NO network at all — not even a LAN. "
+               "Any attempt to reach a host, the internet, or a lab target WILL fail. "
                "Do only local work; do not try downloads, apt installs, or remote scans.")
     elif _NET_MODE == "lab":
         net = ("# Network access\n"
@@ -758,8 +758,8 @@ def _net_prefix(mode):
         if un:
             # -r: rootless user namespace (no sudo); -n: fresh net namespace (lo down).
             return [un, "-rn", "--"], "unshare", None
-        return None, "none", ("SEALED (airgap) mode needs firejail or unshare to remove "
-                              "the network; neither is installed. Install one "
+        return None, "none", ("Airgapped mode needs firejail or unshare to remove the "
+                              "network; neither is installed. Install one "
                               "(sudo apt install -y firejail) or use /net online.")
     if mode == "lab":
         if not fj:
@@ -1842,7 +1842,7 @@ def main(argv):
         if _NET_MODE == "lab":
             lok, lmsg = activate_lab()
             if not lok:
-                print(red(f"lab mode unavailable: {lmsg}\nfalling back to SEALED (airgap)."))
+                print(red(f"lab mode unavailable: {lmsg}\nfalling back to Airgapped."))
                 _NET_MODE = "sealed"
         ok, status = preflight(model)
         if not ok:
@@ -1966,7 +1966,7 @@ def main(argv):
                         print(dim("  already Airgapped.")); continue
                     _NET_MODE = "sealed"
                     messages.append({"role": "system", "content":
-                        "NETWORK MODE CHANGED to SEALED (airgap): shell commands now have NO "
+                        "NETWORK MODE CHANGED to Airgapped: shell commands now have NO "
                         "network at all. Do local work only."})
                     print(green("  Airgapped"))
                 elif arg in ("lab", "offline-lab"):
