@@ -33,7 +33,14 @@ the header every session:
   the internet is unreachable from the lab and refuses lab mode if it isn't** — the airgap
   is proven every time, not trusted — then runs an nmap sweep of the subnet and shows what's
   reachable as a positive control. You can still run `sudo ./lab-net.sh up` by hand.
-- **🌐 ONLINE.** Commands run normally and can reach the internet. You opt in on purpose.
+  Inside the lab the agent runs as a **non-root user** — least privilege. If a tool needs
+  root (a SYN scan, raw sockets), it must prefix `sudo`, which surfaces a red confirmation
+  you can deny; the model is told this and is nudged to try unprivileged options first.
+- **🌐 ONLINE.** Full capabilities — no command is blocked — but **maximum human-in-the-loop**:
+  every command that *acts* (any shell command, write, or edit) requires your approval, and
+  the "always" auto-approve shortcut is disabled so a session can't silently slip into
+  hands-off. Plain reads/lists never prompt. (An explicit launch-time
+  `--dangerously-skip-permissions` still bypasses — a deliberate override, not the default.)
 
 ```bash
 redcoder                 # sealed (default) — no network for shell commands

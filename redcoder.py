@@ -278,7 +278,11 @@ def build_system():
                f"LAB mode: shell commands run in an ISOLATED OFFLINE lab network. You can "
                f"reach fake/lab targets on {LAB_SUBNET} (scan, probe, exploit them freely), "
                f"but there is NO internet — public hosts and DNS are unreachable and apt "
-               f"will fail. Point network tools at {LAB_SUBNET}, not at public addresses.")
+               f"will fail. Point network tools at {LAB_SUBNET}, not at public addresses.\n"
+               f"You run as a NON-root user in the lab. If a tool genuinely needs root "
+               f"(e.g. a SYN scan `nmap -sS`, or raw sockets), prefix the command with "
+               f"`sudo`; that asks the user for approval and they may decline. Prefer "
+               f"unprivileged options first (e.g. `nmap -sT`) and only escalate when needed.")
     else:
         net = ("# Network access\n"
                "ONLINE mode: shell commands can reach the network. Still prefer local "
@@ -753,22 +757,46 @@ def _list_netns():
         return set()
 
 
-def _lab_join_prefix():
+def _current_user():
+    """The unprivileged user redcoder runs as (to drop back to inside the lab)."""
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("SUDO_USER") or os.environ.get("USER") or "kali"
+
+
+def _lab_join_prefix(as_root=False):
     """argv prefix that runs a shell command INSIDE the rclab namespace.
 
-    Prefers firejail (unprivileged, drops root) when present; otherwise falls back
-    to `sudo -n ip netns exec rclab` — which needs the NOPASSWD rule that
-    lab-net.sh installs, and runs the command as root inside the namespace (fine and
-    often wanted for lab tooling). firejail is NOT required; iproute2 (`ip`) is on
-    every Kali. Returns (prefix_argv, error)."""
+    Least privilege by default: we must ENTER as root (ip netns exec needs it), but
+    then drop straight back to the normal user with runuser, so the agent's lab
+    commands are NOT root — they can't nsenter-escape, rfkill, or touch the host.
+    Pass as_root=True only for an explicit, human-approved escalation (or for our own
+    trusted internal probes). firejail, if present, joins the namespace already
+    unprivileged, so it never grants root. iproute2 (`ip`) is on every Kali.
+    Returns (prefix_argv, error)."""
     fj = shutil.which("firejail")
     if fj:
+        # firejail always drops privileges; there is no root path through it.
         return [fj, "--quiet", f"--netns={LAB_NETNS}", "--"], None
     ip = shutil.which("ip")
-    if ip:
-        return ["sudo", "-n", ip, "netns", "exec", LAB_NETNS], None
-    return None, ("need firejail or iproute2 (ip) to enter the lab namespace "
-                  "(sudo apt install -y iproute2)")
+    if not ip:
+        return None, ("need firejail or iproute2 (ip) to enter the lab namespace "
+                      "(sudo apt install -y iproute2)")
+    base = ["sudo", "-n", ip, "netns", "exec", LAB_NETNS]
+    if as_root:
+        return base, None
+    ru = shutil.which("runuser")
+    user = _current_user()
+    if ru and user and user != "root":
+        return base + [ru, "-u", user, "--"], None
+    sp = shutil.which("setpriv")
+    if sp and user and user != "root":
+        return base + [sp, "--reuid", user, "--regid", user, "--init-groups", "--"], None
+    # No privilege-drop tool available: fall back to root (still walled by the
+    # namespace, but without the least-privilege guarantee).
+    return base, None
 
 
 def _net_prefix(mode):
@@ -819,7 +847,7 @@ def _lab_egress_open():
     """
     if LAB_NETNS not in _list_netns():
         return False
-    prefix, jerr = _lab_join_prefix()
+    prefix, jerr = _lab_join_prefix(as_root=True)   # trusted internal safety probe
     if jerr:
         return False
     probe = ("for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do "
@@ -842,7 +870,7 @@ def _lab_scan_summary(timeout=30):
     """
     if LAB_NETNS not in _list_netns():
         return None
-    prefix, jerr = _lab_join_prefix()
+    prefix, jerr = _lab_join_prefix(as_root=True)   # trusted probe; -sn wants root for ARP
     if jerr:
         return None
     if not shutil.which("nmap"):
@@ -906,7 +934,7 @@ def activate_lab():
     built, bmsg = _ensure_lab_built()
     if not built:
         return False, bmsg
-    prefix, jerr = _lab_join_prefix()
+    prefix, jerr = _lab_join_prefix(as_root=True)   # probe the privileged entry itself
     if jerr:
         return False, jerr
     # Prove we can enter the namespace (catches a missing NOPASSWD sudoers rule).
@@ -933,8 +961,16 @@ def activate_lab():
 def t_run_shell(args, approve):
     command = args["command"]
     danger = _dangerous_reason(command)
+
+    # In LAB mode, commands run as your normal USER inside the namespace by default. A
+    # command that asks for root (uses sudo) is an explicit escalation — always confirm.
+    lab_root = (_NET_MODE == "lab" and not IS_WINDOWS
+                and re.search(r"(?:^|\s|\||;|&)sudo\b", command) is not None)
+
     if danger:
         ok = approve(f"Run shell command — {danger}:\n    {command}", force=True)
+    elif lab_root:
+        ok = approve(f"Run shell command AS ROOT in the lab:\n    {command}", force=True)
     else:
         ok = approve(f"Run shell command:\n    {command}")
     if not ok:
@@ -950,14 +986,23 @@ def t_run_shell(args, approve):
 
     # Enforce the current network mode. Fail closed — never silently run with network
     # when the user asked for sealed/lab.
-    prefix, backend, err = _net_prefix(_NET_MODE)
-    if err:
-        raise ToolError(err)
-    if backend == "windows" and _NET_MODE != "online":
-        print(yellow("    ⚠ network isolation is Linux-only and is NOT enforced on "
-                     "Windows — this command may reach the internet"))
-    elif prefix:
+    if _NET_MODE == "lab" and not IS_WINDOWS:
+        if LAB_NETNS not in _list_netns():
+            raise ToolError(f"lab namespace '{LAB_NETNS}' is gone — re-enter lab mode "
+                            f"(/net lab) to rebuild it.")
+        prefix, jerr = _lab_join_prefix(as_root=lab_root)
+        if jerr:
+            raise ToolError("LAB mode: " + jerr)
         argv = prefix + argv
+    else:
+        prefix, backend, err = _net_prefix(_NET_MODE)
+        if err:
+            raise ToolError(err)
+        if backend == "windows" and _NET_MODE != "online":
+            print(yellow("    ⚠ network isolation is Linux-only and is NOT enforced on "
+                         "Windows — this command may reach the internet"))
+        elif prefix:
+            argv = prefix + argv
 
     suffix = {"sealed": " · airgap", "lab": " · lab"}.get(_NET_MODE, "")
     spin = Spinner("running command" + suffix, color=orange).start()
@@ -1021,6 +1066,13 @@ class Approver:
         # `force` = a dangerous command. Always confirm explicitly, even in auto mode,
         # and never let "a=always" apply to it — auto-approve must not cover destructive
         # actions.
+        #
+        # ONLINE is the "maximum human-in-the-loop" mode: every acting command is
+        # confirmed individually and the "a=always" escape is disabled, so a session
+        # can't silently slip from gated into auto. (An explicit launch-time
+        # --dangerously-skip-permissions still bypasses — that's a deliberate override,
+        # not something a single mid-session keystroke can trigger.)
+        online = (_NET_MODE == "online")
         if self.auto and not force:
             print(dim(f"    auto ✓ {description.splitlines()[0]}"))
             return True
@@ -1033,14 +1085,20 @@ class Approver:
         for ln in description.splitlines():
             print(tint("    │ ") + ln)
         print(border("    └──────────────────────────────────────────────"))
-        prompt = "    Run this dangerous command? [y/N] " if force else "    Allow? [Y/n/a=always] "
+        allow_always = not (force or online)
+        if force:
+            prompt = "    Run this dangerous command? [y/N] "
+        elif online:
+            prompt = "    Allow? [Y/n] "
+        else:
+            prompt = "    Allow? [Y/n/a=always] "
         try:
             ans = input(bold(prompt)).strip().lower()
         except EOFError:
             return False
         if force:
             return ans in ("y", "yes")   # dangerous: default No, no "always"
-        if ans in ("a", "always"):
+        if allow_always and ans in ("a", "always"):
             self.auto = True
             return True
         return ans in ("", "y", "yes")
