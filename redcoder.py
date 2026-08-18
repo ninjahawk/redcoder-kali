@@ -842,17 +842,50 @@ def _lab_scan_summary(timeout=30):
             f"(run 'sudo ./lab-net.sh up' to stand up the built-in target)")
 
 
+def _lab_script_path():
+    """Path to lab-net.sh shipped next to this file, or None."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    p = os.path.join(here, "lab-net.sh")
+    return p if os.path.exists(p) else None
+
+
+def _ensure_lab_built():
+    """If the rclab namespace is missing, build it via `sudo ./lab-net.sh up`.
+
+    Runs with the terminal attached so sudo can prompt for a password once and the
+    build/verify output is visible. Returns (ok, message). Building namespaces needs
+    root — this is the one privileged step, kept explicit rather than always-on.
+    """
+    if LAB_NETNS in _list_netns():
+        return True, "already built"
+    script = _lab_script_path()
+    if not script:
+        return False, ("lab-net.sh not found next to redcoder — build the lab manually: "
+                       "sudo ./lab-net.sh up")
+    print(dim(f"  lab not built yet — running: sudo {script} up  (sudo may ask for your password)"))
+    try:
+        r = subprocess.run(["sudo", "bash", script, "up"], timeout=180)
+    except Exception as e:
+        return False, f"could not build the lab: {e}"
+    if r.returncode != 0:
+        return False, "lab build failed (see the output above)"
+    if LAB_NETNS not in _list_netns():
+        return False, "lab build ran but the namespace still isn't there"
+    return True, "lab built"
+
+
 def activate_lab():
     """Attempt to enter LAB mode, verifying the airgap. Returns (ok, message).
-    Refuses (ok=False) unless the rclab namespace exists, we can actually enter it,
-    AND the internet is provably unreachable from inside it.
+    Builds the lab automatically if it isn't up yet, then refuses (ok=False) unless we
+    can enter the namespace AND the internet is provably unreachable from inside it.
 
     On success it also runs an informational nmap sweep of the lab subnet and prints
     what's reachable (a positive control — never part of the safety decision)."""
     if IS_WINDOWS:
         return False, "LAB mode is Linux-only."
-    if LAB_NETNS not in _list_netns():
-        return False, f"lab namespace '{LAB_NETNS}' not found — build it first: sudo ./lab-net.sh up"
+    built, bmsg = _ensure_lab_built()
+    if not built:
+        return False, bmsg
     prefix, jerr = _lab_join_prefix()
     if jerr:
         return False, jerr

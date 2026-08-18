@@ -25,13 +25,14 @@ the header every session:
 - **🧪 LAB — offline lab network.** Commands run inside a pre-built isolated namespace
   (`rclab`) wired to a bridge with **no physical uplink**. Tools like `nmap` reach the
   fake targets on that bridge (`10.66.0.0/24`), but packets have no wire to the internet.
-  Build it with `sudo ./lab-net.sh up`, which also **stands up a built-in target** at
-  `10.66.0.20` (HTTP on port 80) so there's something to scan out of the box, and installs
-  a scoped NOPASSWD sudo rule so redcoder can enter the namespace via `ip netns exec`
+  **`redcoder --lab` builds the lab itself** if it isn't up (asking for your sudo password
+  once per boot, since making namespaces needs root), including a built-in target at
+  `10.66.0.20` (HTTP on port 80) so there's something to scan out of the box; it also installs
+  a scoped NOPASSWD sudo rule so redcoder can *enter* the namespace via `ip netns exec`
   (firejail is used instead if present, but is not required). **redcoder actively verifies
   the internet is unreachable from the lab and refuses lab mode if it isn't** — the airgap
   is proven every time, not trusted — then runs an nmap sweep of the subnet and shows what's
-  reachable as a positive control.
+  reachable as a positive control. You can still run `sudo ./lab-net.sh up` by hand.
 - **🌐 ONLINE.** Commands run normally and can reach the internet. You opt in on purpose.
 
 ```bash

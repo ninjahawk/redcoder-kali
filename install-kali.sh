@@ -131,8 +131,8 @@ fi
 say "Done"
 cat <<EOF
 
-    Start it:        redcoder            (SEALED by default — shell has NO network)
-    Offline lab:     sudo ./lab-net.sh up  then  redcoder --lab   (fake targets, no internet)
+    Start it:        redcoder            (Airgapped by default — shell has NO network)
+    Offline lab:     redcoder --lab      (builds the lab itself; sudo password once per boot)
     Allow internet:  redcoder --online   (or /net online inside a session)
     One-shot:        redcoder -p "explain scan.py"
 
