@@ -1,0 +1,11 @@
+# Force LF everywhere. The launcher and install-kali.sh are run by bash on Linux;
+# a CRLF checkout breaks them with "bad interpreter: /usr/bin/env bash^M".
+* text=auto eol=lf
+
+*.sh        text eol=lf
+redcoder    text eol=lf
+*.py        text eol=lf
+*.md        text eol=lf
+*.html      text eol=lf
+
+webui/index.html text eol=lf
