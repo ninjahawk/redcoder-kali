@@ -84,11 +84,32 @@ up() {
   # 10.66.0.0/24 and nothing else.
   ok "no default route, no NAT — lab reaches $SUBNET only"
 
+  # Let redcoder enter the namespace without a password prompt. Only used when
+  # firejail is unavailable (Kali no longer ships it); scoped strictly to
+  # `ip netns exec rclab ...`. Removed by `down`.
+  install_sudoers
+
   verify
+}
+
+install_sudoers() {
+  local ip_bin sudoers luser
+  ip_bin="$(command -v ip)"
+  sudoers="/etc/sudoers.d/redcoder-lab"
+  luser="${SUDO_USER:-$(logname 2>/dev/null || echo kali)}"
+  printf '%s ALL=(root) NOPASSWD: %s netns exec %s *\n' "$luser" "$ip_bin" "$NS" > "$sudoers"
+  chmod 440 "$sudoers"
+  if visudo -cf "$sudoers" >/dev/null 2>&1; then
+    ok "sudo rule installed ($sudoers) — $luser may enter '$NS' without a password"
+  else
+    rm -f "$sudoers"
+    warn "sudoers check failed; rule not installed (lab mode will need firejail)"
+  fi
 }
 
 down() {
   say "Tearing down the lab network"
+  rm -f /etc/sudoers.d/redcoder-lab && ok "removed sudo rule" || true
   if ip netns list | awk '{print $1}' | grep -qx "$NS"; then
     ip netns del "$NS" && ok "deleted namespace '$NS' (its veth end went with it)"
   else

@@ -18,15 +18,18 @@ the header every session:
 
 - **🔒 SEALED (default) — airgap.** Every `run_shell` command runs inside an *empty*
   network namespace: no interface, no route — no internet **and no LAN**. It's not "asked
-  not to"; there is no usable network stack in the command. Enforced by `firejail
-  --net=none`, or `unshare -rn` if firejail isn't installed. Best for QA of the agent
-  itself. **Fails closed:** if neither tool is present, `run_shell` *refuses to run*.
+  not to"; there is no usable network stack in the command. Enforced by `unshare -rn`
+  (util-linux, always on Kali), or `firejail --net=none` if firejail happens to be
+  installed. Best for QA of the agent itself. **Fails closed:** if neither is present,
+  `run_shell` *refuses to run*.
 - **🧪 LAB — offline lab network.** Commands run inside a pre-built isolated namespace
   (`rclab`) wired to a bridge with **no physical uplink**. Tools like `nmap` can reach
   fake/lab targets you attach to that bridge (`10.66.0.0/24`), but packets have no wire to
-  the internet. Build it first with `sudo ./lab-net.sh up`. **redcoder actively verifies
-  the internet is unreachable from the lab and refuses lab mode if it isn't** — the airgap
-  is proven every time, not trusted.
+  the internet. Build it first with `sudo ./lab-net.sh up` (which also installs a scoped
+  NOPASSWD sudo rule so redcoder can enter the namespace via `ip netns exec`; firejail is
+  used instead if present, but is not required). **redcoder actively verifies the internet
+  is unreachable from the lab and refuses lab mode if it isn't** — the airgap is proven
+  every time, not trusted.
 - **🌐 ONLINE.** Commands run normally and can reach the internet. You opt in on purpose.
 
 ```bash

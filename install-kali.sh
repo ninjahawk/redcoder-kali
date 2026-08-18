@@ -44,24 +44,17 @@ command -v python3 >/dev/null 2>&1 || {
 ok "$(python3 --version)"
 
 # --------------------------------------------------------------------------- #
-# SEALED (default) network mode runs each shell command inside a network
-# namespace with no route out. firejail is the preferred enforcer; unshare
-# (util-linux, always present) is the zero-install fallback. We install firejail
-# so the seal is enforced by the nicer backend, but redcoder works either way.
-say "Checking the network-seal sandbox (firejail)"
-if command -v firejail >/dev/null 2>&1; then
-  ok "firejail present — SEALED mode enforced by firejail"
-elif command -v unshare >/dev/null 2>&1; then
-  warn "firejail not found; installing it for a cleaner seal (falls back to unshare)"
-  if sudo apt-get install -y firejail >/dev/null 2>&1; then
-    ok "firejail installed"
-  else
-    warn "apt install failed — SEALED mode will use unshare instead (also fine)"
-  fi
-else
-  warn "neither firejail nor unshare found — SEALED mode will REFUSE to run shell"
-  warn "commands until one exists. Fix: sudo apt install -y firejail"
-fi
+# Network isolation. Airgapped mode uses `unshare -rn` (util-linux — always on
+# Kali); Lab mode uses `ip netns exec` (iproute2 — always on Kali). firejail is a
+# nicer optional backend but is NOT required and is often absent from the current
+# Kali repo, so we only note whether it happens to be present.
+say "Checking network-isolation tools"
+command -v unshare >/dev/null 2>&1 && ok "unshare present — Airgapped mode ready" \
+  || warn "unshare (util-linux) missing — Airgapped mode will refuse to run shell"
+command -v ip >/dev/null 2>&1 && ok "ip present — Lab mode ready (with ./lab-net.sh up)" \
+  || warn "ip (iproute2) missing — Lab mode unavailable"
+command -v firejail >/dev/null 2>&1 && ok "firejail present (optional nicer backend)" \
+  || ok "firejail not installed — not needed"
 
 # --------------------------------------------------------------------------- #
 say "Checking Ollama"

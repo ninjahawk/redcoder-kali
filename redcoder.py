@@ -733,17 +733,35 @@ def _list_netns():
         return set()
 
 
+def _lab_join_prefix():
+    """argv prefix that runs a shell command INSIDE the rclab namespace.
+
+    Prefers firejail (unprivileged, drops root) when present; otherwise falls back
+    to `sudo -n ip netns exec rclab` — which needs the NOPASSWD rule that
+    lab-net.sh installs, and runs the command as root inside the namespace (fine and
+    often wanted for lab tooling). firejail is NOT required; iproute2 (`ip`) is on
+    every Kali. Returns (prefix_argv, error)."""
+    fj = shutil.which("firejail")
+    if fj:
+        return [fj, "--quiet", f"--netns={LAB_NETNS}", "--"], None
+    ip = shutil.which("ip")
+    if ip:
+        return ["sudo", "-n", ip, "netns", "exec", LAB_NETNS], None
+    return None, ("need firejail or iproute2 (ip) to enter the lab namespace "
+                  "(sudo apt install -y iproute2)")
+
+
 def _net_prefix(mode):
     """argv prefix that ENFORCES `mode` for a shell command, plus a status.
 
     Returns (prefix_argv, label, error):
       prefix_argv  argv to prepend to the real command ([] = run as-is), or None
-      label        "firejail" | "unshare" | "firejail-lab" | "online" | "windows" | "none"
+      label        "firejail" | "unshare" | "lab" | "online" | "windows" | "none"
       error        None, or a message; if set, the caller MUST refuse (fail closed).
 
     - online: no wrapper.
     - sealed: empty net namespace (firejail --net=none, or unshare -rn) — airgap.
-    - lab:    join the pre-built isolated 'rclab' namespace (firejail --netns).
+    - lab:    join the pre-built isolated 'rclab' namespace (firejail, or ip netns exec).
     Isolation is Linux-only; on Windows the caller warns and does not enforce.
     """
     if mode == "online":
@@ -762,13 +780,13 @@ def _net_prefix(mode):
                               "network; neither is installed. Install one "
                               "(sudo apt install -y firejail) or use /net online.")
     if mode == "lab":
-        if not fj:
-            return None, "none", ("LAB mode needs firejail to join the isolated lab "
-                                  "namespace; install it: sudo apt install -y firejail")
         if LAB_NETNS not in _list_netns():
             return None, "none", (f"LAB mode needs the '{LAB_NETNS}' namespace, which does "
                                   f"not exist. Build the offline lab first:  ./lab-net.sh up")
-        return [fj, "--quiet", f"--netns={LAB_NETNS}", "--"], "firejail-lab", None
+        prefix, jerr = _lab_join_prefix()
+        if jerr:
+            return None, "none", "LAB mode: " + jerr
+        return prefix, "lab", None
     return None, "none", f"unknown network mode: {mode}"
 
 
@@ -779,16 +797,17 @@ def _lab_egress_open():
     curl, ping, or root. Any successful connect means the airgap is NOT holding, so
     lab mode must be refused. Errs toward 'blocked' (safe) if it cannot test.
     """
-    fj = shutil.which("firejail")
-    if not fj or LAB_NETNS not in _list_netns():
+    if LAB_NETNS not in _list_netns():
+        return False
+    prefix, jerr = _lab_join_prefix()
+    if jerr:
         return False
     probe = ("for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do "
              "timeout 2 bash -c \"exec 3<>/dev/tcp/$ip/443\" 2>/dev/null && exit 0; "
              "done; exit 1")
     try:
-        r = subprocess.run([fj, "--quiet", f"--netns={LAB_NETNS}", "--",
-                            "bash", "-lc", probe],
-                           capture_output=True, text=True, timeout=12)
+        r = subprocess.run(prefix + ["bash", "-lc", probe],
+                           capture_output=True, text=True, timeout=15)
         return r.returncode == 0   # 0 = a connect succeeded = internet reachable = UNSAFE
     except Exception:
         return False
@@ -796,14 +815,25 @@ def _lab_egress_open():
 
 def activate_lab():
     """Attempt to enter LAB mode, verifying the airgap. Returns (ok, message).
-    Refuses (ok=False) unless firejail + the rclab namespace exist AND the internet
-    is provably unreachable from inside it."""
+    Refuses (ok=False) unless the rclab namespace exists, we can actually enter it,
+    AND the internet is provably unreachable from inside it."""
     if IS_WINDOWS:
         return False, "LAB mode is Linux-only."
-    if not shutil.which("firejail"):
-        return False, "LAB mode needs firejail — sudo apt install -y firejail"
     if LAB_NETNS not in _list_netns():
-        return False, (f"lab namespace '{LAB_NETNS}' not found — build it first: ./lab-net.sh up")
+        return False, f"lab namespace '{LAB_NETNS}' not found — build it first: sudo ./lab-net.sh up"
+    prefix, jerr = _lab_join_prefix()
+    if jerr:
+        return False, jerr
+    # Prove we can enter the namespace (catches a missing NOPASSWD sudoers rule).
+    try:
+        p = subprocess.run(prefix + ["true"], capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        return False, f"cannot enter lab namespace '{LAB_NETNS}': {e}"
+    if p.returncode != 0:
+        tail = (p.stderr or "").strip().splitlines()
+        detail = (" — " + tail[-1]) if tail else ""
+        return False, (f"cannot enter lab namespace '{LAB_NETNS}'{detail}. "
+                       f"Re-run: sudo ./lab-net.sh up")
     if _lab_egress_open():
         return False, ("REFUSED — the internet is REACHABLE from the lab namespace; the "
                        "airgap is NOT holding. Fix ./lab-net.sh / routing before lab use.")
