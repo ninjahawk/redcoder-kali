@@ -153,10 +153,12 @@ call a tool with arguments you have already used — the answer is already there
 a call is always a mistake.
 
 # Calling a tool
-Reply with ONLY a single fenced json block, nothing before or after:
+Reply with ONLY a single fenced json block, nothing before or after. Include a short
+"why" field — ONE plain sentence saying what this call is for (it is shown to the user):
 ```json
-{"name": "TOOL_NAME", "arguments": { ... }}
+{"name": "TOOL_NAME", "arguments": { ... }, "why": "what I'm doing and why, in one line"}
 ```
+Keep the json valid — the "why" is one short string, still inside the single json block.
 
 # Final answer
 Plain text, NO json block. Concise Markdown. Say what you found or did — briefly.
@@ -377,13 +379,18 @@ def _coerce_action(obj):
     if name in TOOL_NAMES:
         args = obj.get("arguments")
         if args is None:
-            args = {k: v for k, v in obj.items() if k != "name"}
+            args = {k: v for k, v in obj.items() if k not in ("name", "why")}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
             except Exception:
                 args = {}
-        return {"name": name, "arguments": args if isinstance(args, dict) else {}}
+        act = {"name": name, "arguments": args if isinstance(args, dict) else {}}
+        # Optional one-line narration the model may include; shown before the call.
+        why = obj.get("why")
+        if isinstance(why, str) and why.strip():
+            act["why"] = why.strip()
+        return act
     return None
 
 
@@ -1323,6 +1330,11 @@ def agent_turn(model, messages, approve):
                 "DIFFERENT action that makes progress, or give your final answer."})
             continue
         # -----------------------------------------------------------------------------
+
+        # Narration: show the model's one-line "why" before the action (Claude-Code feel).
+        why = action.pop("why", None)
+        if why:
+            print(cyan("  » ") + dim(why))
 
         # If the streamer already showed the tool live (write_file), don't repeat it.
         if not printer.displayed:
