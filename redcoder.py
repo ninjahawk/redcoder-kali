@@ -364,10 +364,20 @@ def ollama_chat(model, messages, on_token=None):
                     tool_calls.extend(msg["tool_calls"])
                 if obj.get("error"):
                     raise RuntimeError(obj["error"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # Ollama IS up; it just doesn't have this model.
+            raise RuntimeError(
+                f"Model '{model}' not found. Ollama is running but that model doesn't "
+                f"exist. Create it (e.g. `ollama cp <existing> {model}` or "
+                f"`ollama create {model} -f config/Modelfile.{model}`), or pick another "
+                f"with /model."
+            )
+        raise RuntimeError(f"Ollama returned HTTP {e.code}: {e.reason}")
     except urllib.error.URLError as e:
         raise RuntimeError(
             f"Cannot reach Ollama at 127.0.0.1:11434 ({getattr(e, 'reason', e)}). "
-            f"Is it running, and does the '{model}' model exist?"
+            f"Start it with `ollama serve` (or `systemctl start ollama`)."
         )
     return "".join(content), tool_calls
 
