@@ -27,10 +27,13 @@ Flags (Claude-Code style):
     -y, --auto,
     --dangerously-skip-permissions  auto-approve ALL writes/edits/shell — no prompts
     -m, --model NAME                use a different Ollama model (default: redcoder)
-    --sealed, --offline             SEALED network mode (default): shell commands
-                                    have NO internet — enforced by a sandbox
-    --online                        ONLINE network mode: shell commands CAN reach
-                                    the internet. Deliberate opt-in.
+    --sealed, --offline             SEALED (default): shell commands have NO network
+                                    at all (airgap) — enforced by a namespace
+    --lab                           OFFLINE LAB: shell commands reach an isolated lab
+                                    network (fake targets) but NOT the internet;
+                                    verified before use (needs ./lab-net.sh up)
+    --online                        ONLINE: shell commands CAN reach the internet.
+                                    Deliberate opt-in.
     -C, --cwd DIR                   start in DIR instead of the current directory
     --no-color                      plain output, no ANSI colors
     --no-voice                      disable hold-Space-to-talk voice input
@@ -125,16 +128,23 @@ STOP_TOOL_WORDS = {"stop", "done", "finish", "finished", "end", "complete", "com
 # (we use the HTTP API so this is moot, but it costs nothing to be explicit).
 os.environ.setdefault("OLLAMA_NOHISTORY", "1")
 
-# Network mode. Two deliberate states, never ambiguous:
-#   SEALED (default) — every run_shell command runs inside a network-isolated
-#                      sandbox (firejail --net=none, or unshare -rn). The command
-#                      has no route to the internet: not "asked not to", but no
-#                      usable network stack. FAILS CLOSED — if no sandbox tool is
-#                      present, run_shell refuses rather than silently going online.
-#   ONLINE           — commands run normally and can reach the network. Opt in with
-#                      --online or /net online.
-# Flip at launch (--sealed/--online) or in-session (/net sealed | /net online).
-NET_SEALED_DEFAULT = True
+# Network mode — three deliberate states, always shown in the header, never ambiguous:
+#   "sealed" (default) — AIRGAP. Each run_shell command runs in an empty network
+#                        namespace (firejail --net=none, or unshare -rn): no interface,
+#                        no route — no internet AND no LAN. Strongest; ideal for QA of
+#                        the agent itself.
+#   "lab"              — OFFLINE LAB. Commands run inside a pre-built isolated namespace
+#                        ("rclab", from ./lab-net.sh up) whose bridge has NO physical
+#                        uplink, so tools like nmap can reach fake/lab targets on the lab
+#                        subnet but packets have no wire to the internet. Before entering
+#                        this mode redcoder ACTIVELY VERIFIES the internet is unreachable
+#                        and refuses if it isn't — the airgap is proven, not trusted.
+#   "online"           — commands run normally and CAN reach the internet. Deliberate.
+# Both "sealed" and "lab" FAIL CLOSED: if the isolation can't be enforced or verified,
+# run_shell refuses rather than risk touching the network.
+NET_MODE_DEFAULT = "sealed"
+LAB_NETNS = "rclab"        # named namespace built by lab-net.sh for OFFLINE LAB mode
+LAB_SUBNET = "10.66.0.0/24"  # lab targets live here; rclab has no route beyond it
 
 IS_WINDOWS = os.name == "nt"
 SHELL_LABEL = "PowerShell" if IS_WINDOWS else "bash"
@@ -257,13 +267,18 @@ if not IS_WINDOWS:
 
 def build_system():
     """SYSTEM_PROMPT plus a line telling the model the current network mode, so it
-    does not waste steps attempting online work while sealed."""
-    if _SEALED:
+    does not waste steps attempting work the mode won't allow."""
+    if _NET_MODE == "sealed":
         net = ("# Network access\n"
-               "SEALED mode: shell commands run with NO network — any attempt to reach "
-               "the internet or a remote host WILL fail. Do only local work; do not try "
-               "downloads, apt installs, or remote scans. If a task genuinely needs "
-               "network, say so and tell the user to switch to online mode.")
+               "SEALED (airgap) mode: shell commands have NO network at all — not even a "
+               "LAN. Any attempt to reach a host, the internet, or a lab target WILL fail. "
+               "Do only local work; do not try downloads, apt installs, or remote scans.")
+    elif _NET_MODE == "lab":
+        net = ("# Network access\n"
+               f"LAB mode: shell commands run in an ISOLATED OFFLINE lab network. You can "
+               f"reach fake/lab targets on {LAB_SUBNET} (scan, probe, exploit them freely), "
+               f"but there is NO internet — public hosts and DNS are unreachable and apt "
+               f"will fail. Point network tools at {LAB_SUBNET}, not at public addresses.")
     else:
         net = ("# Network access\n"
                "ONLINE mode: shell commands can reach the network. Still prefer local "
@@ -291,7 +306,7 @@ def _enable_vt():
 
 _enable_vt()
 _C = sys.stdout.isatty()
-_SEALED = NET_SEALED_DEFAULT   # current network mode; set in main(), toggled by /net
+_NET_MODE = NET_MODE_DEFAULT   # "sealed" | "lab" | "online"; set in main(), toggled by /net
 
 
 def c(text, code):
@@ -708,26 +723,92 @@ def _dangerous_reason(command):
     return None
 
 
-def _sandbox_backend():
-    """How to run a shell command with NO network access (SEALED mode). Linux only.
+def _list_netns():
+    """Names of the persistent network namespaces (created via `ip netns add`)."""
+    try:
+        out = subprocess.run(["ip", "netns", "list"], capture_output=True,
+                             text=True, timeout=5)
+        return {ln.split()[0] for ln in out.stdout.splitlines() if ln.strip()}
+    except Exception:
+        return set()
 
-    Returns (prefix_argv, label):
-      prefix_argv  argv to prepend to the real command, or None if unavailable
-      label        "firejail" | "unshare" | "windows" | "none"
-    firejail is preferred (purpose-built, keeps an isolated loopback up); unshare
-    is the zero-install fallback (util-linux is always on Kali). Both put the
-    command in a fresh network namespace with no route off the machine.
+
+def _net_prefix(mode):
+    """argv prefix that ENFORCES `mode` for a shell command, plus a status.
+
+    Returns (prefix_argv, label, error):
+      prefix_argv  argv to prepend to the real command ([] = run as-is), or None
+      label        "firejail" | "unshare" | "firejail-lab" | "online" | "windows" | "none"
+      error        None, or a message; if set, the caller MUST refuse (fail closed).
+
+    - online: no wrapper.
+    - sealed: empty net namespace (firejail --net=none, or unshare -rn) — airgap.
+    - lab:    join the pre-built isolated 'rclab' namespace (firejail --netns).
+    Isolation is Linux-only; on Windows the caller warns and does not enforce.
     """
+    if mode == "online":
+        return [], "online", None
     if IS_WINDOWS:
-        return None, "windows"
+        return [], "windows", None
     fj = shutil.which("firejail")
-    if fj:
-        return [fj, "--quiet", "--net=none", "--"], "firejail"
-    un = shutil.which("unshare")
-    if un:
-        # -r: rootless user namespace (no sudo needed); -n: new net namespace (lo down).
-        return [un, "-rn", "--"], "unshare"
-    return None, "none"
+    if mode == "sealed":
+        if fj:
+            return [fj, "--quiet", "--net=none", "--"], "firejail", None
+        un = shutil.which("unshare")
+        if un:
+            # -r: rootless user namespace (no sudo); -n: fresh net namespace (lo down).
+            return [un, "-rn", "--"], "unshare", None
+        return None, "none", ("SEALED (airgap) mode needs firejail or unshare to remove "
+                              "the network; neither is installed. Install one "
+                              "(sudo apt install -y firejail) or use /net online.")
+    if mode == "lab":
+        if not fj:
+            return None, "none", ("LAB mode needs firejail to join the isolated lab "
+                                  "namespace; install it: sudo apt install -y firejail")
+        if LAB_NETNS not in _list_netns():
+            return None, "none", (f"LAB mode needs the '{LAB_NETNS}' namespace, which does "
+                                  f"not exist. Build the offline lab first:  ./lab-net.sh up")
+        return [fj, "--quiet", f"--netns={LAB_NETNS}", "--"], "firejail-lab", None
+    return None, "none", f"unknown network mode: {mode}"
+
+
+def _lab_egress_open():
+    """True if the internet is REACHABLE from the lab namespace (i.e. UNSAFE).
+
+    Opens a bash /dev/tcp connection to public IPs with a short timeout — needs no
+    curl, ping, or root. Any successful connect means the airgap is NOT holding, so
+    lab mode must be refused. Errs toward 'blocked' (safe) if it cannot test.
+    """
+    fj = shutil.which("firejail")
+    if not fj or LAB_NETNS not in _list_netns():
+        return False
+    probe = ("for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do "
+             "timeout 2 bash -c \"exec 3<>/dev/tcp/$ip/443\" 2>/dev/null && exit 0; "
+             "done; exit 1")
+    try:
+        r = subprocess.run([fj, "--quiet", f"--netns={LAB_NETNS}", "--",
+                            "bash", "-lc", probe],
+                           capture_output=True, text=True, timeout=12)
+        return r.returncode == 0   # 0 = a connect succeeded = internet reachable = UNSAFE
+    except Exception:
+        return False
+
+
+def activate_lab():
+    """Attempt to enter LAB mode, verifying the airgap. Returns (ok, message).
+    Refuses (ok=False) unless firejail + the rclab namespace exist AND the internet
+    is provably unreachable from inside it."""
+    if IS_WINDOWS:
+        return False, "LAB mode is Linux-only."
+    if not shutil.which("firejail"):
+        return False, "LAB mode needs firejail — sudo apt install -y firejail"
+    if LAB_NETNS not in _list_netns():
+        return False, (f"lab namespace '{LAB_NETNS}' not found — build it first: ./lab-net.sh up")
+    if _lab_egress_open():
+        return False, ("REFUSED — the internet is REACHABLE from the lab namespace; the "
+                       "airgap is NOT holding. Fix ./lab-net.sh / routing before lab use.")
+    return True, (f"lab '{LAB_NETNS}' verified — reaches {LAB_SUBNET} targets, internet "
+                  f"proven unreachable.")
 
 
 def t_run_shell(args, approve):
@@ -746,27 +827,19 @@ def t_run_shell(args, approve):
         # bash if present (Kali ships it), otherwise whatever /bin/sh is.
         argv = [shutil.which("bash") or "/bin/sh", "-lc", command]
 
-    # SEALED mode: wrap the command so it physically has no network. Fail closed —
-    # never silently run un-sealed when the user asked for sealed.
-    sealed_label = None
-    if _SEALED:
-        prefix, backend = _sandbox_backend()
-        if backend == "windows":
-            print(yellow("    ⚠ network seal is Linux-only and is NOT enforced on "
-                         "Windows — this command may reach the internet"))
-        elif backend == "none":
-            raise ToolError(
-                "SEALED (offline) mode is on, but no sandbox mechanism is available "
-                "to enforce it (need `firejail` or `unshare`). Refusing to run so "
-                "nothing reaches the network unexpectedly. Install one "
-                "(`sudo apt install -y firejail`) or deliberately switch to online "
-                "mode with `/net online`.")
-        else:
-            argv = prefix + argv
-            sealed_label = backend
+    # Enforce the current network mode. Fail closed — never silently run with network
+    # when the user asked for sealed/lab.
+    prefix, backend, err = _net_prefix(_NET_MODE)
+    if err:
+        raise ToolError(err)
+    if backend == "windows" and _NET_MODE != "online":
+        print(yellow("    ⚠ network isolation is Linux-only and is NOT enforced on "
+                     "Windows — this command may reach the internet"))
+    elif prefix:
+        argv = prefix + argv
 
-    spin = Spinner("running command" + (" · sealed" if sealed_label else ""),
-                   color=orange).start()
+    suffix = {"sealed": " · airgap", "lab": " · lab"}.get(_NET_MODE, "")
+    spin = Spinner("running command" + suffix, color=orange).start()
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=600,
@@ -1475,8 +1548,8 @@ Commands (type inside the session):
   /save              write a ./redcoder.md checkpoint of this session (manual)
   /resume            load a ./redcoder.md checkpoint back into context
   /auto              toggle auto-approve for writes/edits/shell
-  /net [MODE]        network mode: /net (status), /net sealed (no internet),
-                     /net online (allow internet)
+  /net [MODE]        network mode: /net (status), /net sealed (airgap),
+                     /net lab (offline lab net), /net online (allow internet)
   /model [NAME]      pick a model from a menu (or /model NAME to switch directly)
   /cwd [PATH]        show or change the working directory
   /exit, /quit       leave (Ctrl-C also works)
@@ -1703,11 +1776,11 @@ def input_bar(model, prefill=None):
 
 
 def main(argv):
-    global _C, _VOICE, _SEALED
+    global _C, _VOICE, _NET_MODE
     auto = False
     print_mode = False
     no_voice = False
-    sealed = NET_SEALED_DEFAULT
+    net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
     start_parts = []
@@ -1718,10 +1791,12 @@ def main(argv):
             auto = True
         elif a == "--no-voice":
             no_voice = True
-        elif a in ("--sealed", "--offline"):
-            sealed = True
+        elif a in ("--sealed", "--offline", "--airgap"):
+            net_mode = "sealed"
+        elif a in ("--lab", "--offline-lab"):
+            net_mode = "lab"
         elif a == "--online":
-            sealed = False
+            net_mode = "online"
         elif a in ("-p", "--print"):
             print_mode = True
         elif a in ("-m", "--model") and i + 1 < len(argv):
@@ -1743,7 +1818,7 @@ def main(argv):
             start_parts.append(a)
         i += 1
 
-    _SEALED = sealed
+    _NET_MODE = net_mode
 
     if start_cwd:
         try:
@@ -1764,6 +1839,11 @@ def main(argv):
         if not prompt:
             print("redcoder: --print needs a prompt (as an argument or on stdin).")
             return 2
+        if _NET_MODE == "lab":
+            lok, lmsg = activate_lab()
+            if not lok:
+                print(red(f"lab mode unavailable: {lmsg}\nfalling back to SEALED (airgap)."))
+                _NET_MODE = "sealed"
         ok, status = preflight(model)
         if not ok:
             print(status)
@@ -1789,16 +1869,27 @@ def main(argv):
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
-    if _SEALED:
+    if _NET_MODE == "lab":
+        ok, msg = activate_lab()
+        if ok:
+            print(green("  " + msg))
+        else:
+            print(red("  ⚠ lab mode unavailable: " + msg))
+            print(red("  → falling back to SEALED (airgap)."))
+            _NET_MODE = "sealed"
+    if _NET_MODE == "sealed":
         print(green("  🔒 SEALED — shell commands have NO network"
-                    + ("" if w < 62 else " (offline; enforced by sandbox)")))
-        if not IS_WINDOWS:
-            _, backend = _sandbox_backend()
-            if backend == "none":
+                    + ("" if w < 62 else " (airgap; enforced by namespace)")))
+        if IS_WINDOWS:
+            print(yellow("  ⚠ isolation is Linux-only; not enforced on Windows"))
+        else:
+            _, _, err = _net_prefix("sealed")
+            if err:
                 print(red("  ⚠ no firejail/unshare found — shell commands will REFUSE "
                           "to run until one is installed (sudo apt install -y firejail)"))
-        elif IS_WINDOWS:
-            print(yellow("  ⚠ seal is Linux-only; not enforced on Windows"))
+    elif _NET_MODE == "lab":
+        print(green("  🧪 LAB — offline lab net"
+                    + ("" if w < 62 else f"; reaches {LAB_SUBNET} targets, no internet")))
     else:
         print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
     if _VOICE:
@@ -1869,34 +1960,48 @@ def main(argv):
             if cmd == "net":
                 arg = rest.strip().lower()
                 if arg in ("", "status"):
-                    if _SEALED:
-                        _, backend = _sandbox_backend()
+                    if _NET_MODE == "sealed":
+                        _, backend, err = _net_prefix("sealed")
                         how = ("Windows: NOT enforced" if backend == "windows"
-                               else "no sandbox found — commands will refuse to run"
-                               if backend == "none" else f"enforced via {backend}")
-                        print(green(f"  🔒 SEALED — shell commands have NO network  ({how})"))
+                               else "no sandbox — commands refuse to run" if err
+                               else f"airgap via {backend}")
+                        print(green(f"  🔒 SEALED — no network  ({how})"))
+                    elif _NET_MODE == "lab":
+                        print(green(f"  🧪 LAB — offline lab net, reaches {LAB_SUBNET}, no internet"))
                     else:
                         print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
-                    print(grey("  /net sealed  = no internet   ·   /net online = allow internet"))
-                elif arg in ("sealed", "offline", "off"):
-                    if _SEALED:
+                    print(grey("  /net sealed = airgap  ·  /net lab = offline lab  ·  /net online = internet"))
+                elif arg in ("sealed", "offline", "off", "airgap"):
+                    if _NET_MODE == "sealed":
                         print(dim("  already SEALED.")); continue
-                    _SEALED = True
+                    _NET_MODE = "sealed"
                     messages.append({"role": "system", "content":
-                        "NETWORK MODE CHANGED to SEALED: shell commands now have NO network. "
-                        "Online attempts will fail; do local work only."})
+                        "NETWORK MODE CHANGED to SEALED (airgap): shell commands now have NO "
+                        "network at all. Do local work only."})
                     print(green("  🔒 now SEALED — shell commands have NO network."))
+                elif arg in ("lab", "offline-lab"):
+                    if _NET_MODE == "lab":
+                        print(dim("  already in LAB mode.")); continue
+                    ok, msg = activate_lab()
+                    if not ok:
+                        print(red("  ✗ " + msg)); continue
+                    _NET_MODE = "lab"
+                    messages.append({"role": "system", "content":
+                        f"NETWORK MODE CHANGED to LAB: shell commands reach the isolated "
+                        f"offline lab network ({LAB_SUBNET}) only — no internet. Aim tools at "
+                        f"{LAB_SUBNET}, not public hosts."})
+                    print(green("  🧪 " + msg))
                 elif arg in ("online", "on"):
-                    if not _SEALED:
+                    if _NET_MODE == "online":
                         print(dim("  already ONLINE.")); continue
-                    _SEALED = False
+                    _NET_MODE = "online"
                     messages.append({"role": "system", "content":
                         "NETWORK MODE CHANGED to ONLINE: shell commands can now reach the "
                         "network. Still prefer local work; go online only when required."})
                     print(yellow("  🌐 now ONLINE — shell commands CAN reach the internet."))
                     print(red("  ⚠ the offline guarantee is off until you /net sealed again."))
                 else:
-                    print(yellow(f"  usage: /net [status|sealed|online]"))
+                    print(yellow("  usage: /net [status|sealed|lab|online]"))
                 continue
             if cmd in ("model", "models"):
                 choice = rest.strip() or pick_model(model)

@@ -127,6 +127,7 @@ ok "created '${MODEL_NAME}'"
 # --------------------------------------------------------------------------- #
 say "Installing the launcher"
 chmod +x "$HERE/redcoder"
+[ -f "$HERE/lab-net.sh" ] && chmod +x "$HERE/lab-net.sh" || true
 if sudo ln -sf "$HERE/redcoder" /usr/local/bin/redcoder 2>/dev/null; then
   ok "/usr/local/bin/redcoder -> $HERE/redcoder"
 else
@@ -137,7 +138,8 @@ fi
 say "Done"
 cat <<EOF
 
-    Start it:        redcoder            (SEALED by default — shell has NO internet)
+    Start it:        redcoder            (SEALED by default — shell has NO network)
+    Offline lab:     sudo ./lab-net.sh up  then  redcoder --lab   (fake targets, no internet)
     Allow internet:  redcoder --online   (or /net online inside a session)
     One-shot:        redcoder -p "explain scan.py"
 

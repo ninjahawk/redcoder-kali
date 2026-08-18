@@ -9,34 +9,61 @@ history file, and no telemetry — only the files you ask it to change.
 
 ---
 
-## Two network modes — sealed and online
+## Three network modes — sealed, lab, online
 
 The agent process is offline by construction: it only ever talks to the local Ollama
 server on `127.0.0.1`. But the *shell commands the model runs* (`curl`, `nmap`, `apt`, ...)
-can reach the internet. So there are two deliberate modes, chosen explicitly and shown in
+can reach the network. So there are three deliberate modes, chosen explicitly and shown in
 the header every session:
 
-- **🔒 SEALED (default)** — every `run_shell` command runs inside a network namespace with
-  **no route off the machine**. It's not "asked not to" — there is no usable network stack
-  inside the command. This is enforced by `firejail --net=none`, or `unshare -rn` if
-  firejail isn't installed. **Fails closed:** if neither tool is present, `run_shell`
-  *refuses to run* rather than silently going online.
-- **🌐 ONLINE** — commands run normally and can reach the network. You opt in on purpose.
+- **🔒 SEALED (default) — airgap.** Every `run_shell` command runs inside an *empty*
+  network namespace: no interface, no route — no internet **and no LAN**. It's not "asked
+  not to"; there is no usable network stack in the command. Enforced by `firejail
+  --net=none`, or `unshare -rn` if firejail isn't installed. Best for QA of the agent
+  itself. **Fails closed:** if neither tool is present, `run_shell` *refuses to run*.
+- **🧪 LAB — offline lab network.** Commands run inside a pre-built isolated namespace
+  (`rclab`) wired to a bridge with **no physical uplink**. Tools like `nmap` can reach
+  fake/lab targets you attach to that bridge (`10.66.0.0/24`), but packets have no wire to
+  the internet. Build it first with `sudo ./lab-net.sh up`. **redcoder actively verifies
+  the internet is unreachable from the lab and refuses lab mode if it isn't** — the airgap
+  is proven every time, not trusted.
+- **🌐 ONLINE.** Commands run normally and can reach the internet. You opt in on purpose.
 
 ```bash
-redcoder                 # sealed (default) — no internet for shell commands
+redcoder                 # sealed (default) — no network for shell commands
+redcoder --lab           # offline lab — reaches fake targets, never the internet
 redcoder --online        # online — shell commands can reach the internet
 ```
 
-Inside a session, `/net` shows the current mode and `/net sealed` / `/net online` switch
-it. The model is told which mode it's in, so while sealed it won't waste steps attempting
-downloads or remote scans. For QA testing, sealed is exactly right: the model can flail all
-it likes and physically cannot touch the network. Flip to online only for real work that
-needs it (Kali's remote tooling, package installs).
+Inside a session, `/net` shows the current mode and `/net sealed` / `/net lab` /
+`/net online` switch it. The model is told which mode it's in, so while sealed/lab it won't
+waste steps attempting public downloads or remote scans.
 
-The seal covers the model's shell commands, not a bug in `redcoder.py` itself — for that
-harder guarantee, run the whole thing in a container. It's a Linux feature; on the Windows
-build the flag exists but is not enforced (there's no firejail), and the header says so.
+### The offline lab (`--lab`)
+
+`lab-net.sh` builds the isolated network. The safety invariant is simple: **its bridge is
+never enslaved to a physical NIC**, so nothing on it can reach the internet, regardless of
+routes. The script's `verify` (and redcoder's own pre-flight check) actively opens a TCP
+connection to public resolvers from inside the namespace and requires it to *fail*.
+
+```bash
+sudo ./lab-net.sh up        # build + verify the lab network (10.66.0.0/24)
+sudo ./lab-net.sh verify    # re-prove the internet is unreachable
+sudo ./lab-net.sh status    # namespace / bridge / attached targets
+sudo ./lab-net.sh down      # tear it down
+```
+
+It's runtime kernel state — re-run `up` after each boot (live USB doesn't persist it).
+Attach a fake target by giving any container/VM a `10.66.0.x` address on the bridge; the
+script prints a copy-paste one-liner that spawns a throwaway target namespace.
+
+### What the seal does and doesn't cover
+
+The seal covers the *model's shell commands* — the one path a hallucination can take to the
+network. It does not sandbox a bug in `redcoder.py` itself (which only ever dials
+`127.0.0.1`); for that harder guarantee, run the whole thing in a container. Isolation is a
+Linux feature — on the Windows build the flags exist but are not enforced (no firejail/
+namespaces), and the header says so plainly.
 
 ---
 
@@ -207,7 +234,8 @@ tokens/sec, which is fine for verifying the setup and unusable for real work.
 ## Usage
 
 ```
-redcoder                                     interactive (SEALED — no internet)
+redcoder                                     interactive (SEALED — no network)
+redcoder --lab                               offline lab net (fake targets, no internet)
 redcoder --online                            allow shell commands to reach the internet
 redcoder --dangerously-skip-permissions      never ask before writes/edits/shell
 redcoder -p "explain scan.py"                one-shot, print and exit
