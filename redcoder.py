@@ -738,11 +738,39 @@ _DANGEROUS_PATTERNS = [
      "control a networking service"),
 ]
 
+# Powerful/offensive tools. These are RED only in ONLINE mode — there they can reach
+# real targets, so each use is confirmed deliberately. In the airgapped lab they stay
+# yellow (normal), since running them against fake targets is the whole point and they
+# can't escape. Matched case-insensitively.
+_POWER_TOOLS = [
+    (r"\b(nmap|masscan|zmap|unicornscan|rustscan)\b", "network/port scanner"),
+    (r"\bsqlmap\b", "SQL-injection tool (sqlmap)"),
+    (r"\b(hydra|medusa|patator|ncrack)\b", "credential brute-forcer"),
+    (r"\bhashcat\b|\bjohntheripper\b|(?:^|[;&|]\s*)john\b", "password cracker"),
+    (r"\b(msfconsole|msfvenom|metasploit|meterpreter)\b", "Metasploit"),
+    (r"\b(nikto|wpscan|joomscan|whatweb)\b", "web vulnerability scanner"),
+    (r"\b(gobuster|ffuf|dirb|dirbuster|feroxbuster|wfuzz)\b", "web fuzzer/brute-forcer"),
+    (r"\b(aircrack-ng|airodump-ng|aireplay-ng|reaver|bully)\b", "wireless attack tool"),
+    (r"\b(responder|bettercap|ettercap|arpspoof)\b", "MITM/network attack tool"),
+    (r"\b(crackmapexec|netexec|nxc|enum4linux|impacket-\w+)\b", "network enumeration/attack tool"),
+    (r"\b(nc|ncat|netcat|socat)\b", "raw network connection (netcat/socat)"),
+    (r"\bsetoolkit\b", "social-engineering toolkit"),
+]
+
 
 def _dangerous_reason(command):
     """Return a human reason if the command matches a dangerous pattern, else None."""
     for pat, reason in _DANGEROUS_PATTERNS:
         if re.search(pat, command):
+            return reason
+    return None
+
+
+def _power_tool_reason(command):
+    """Return a human reason if the command runs a powerful/offensive tool, else None.
+    Callers apply this ONLY in online mode (red there; yellow/normal in the lab)."""
+    for pat, reason in _POWER_TOOLS:
+        if re.search(pat, command, re.IGNORECASE):
             return reason
     return None
 
@@ -962,6 +990,12 @@ def t_run_shell(args, approve):
     command = args["command"]
     danger = _dangerous_reason(command)
 
+    # Powerful/offensive tools are RED only in online mode (where they reach real
+    # targets); in the airgapped lab they're normal yellow commands.
+    power = None
+    if not danger and _NET_MODE == "online":
+        power = _power_tool_reason(command)
+
     # In LAB mode, commands run as your normal USER inside the namespace by default. A
     # command that asks for root (uses sudo) is an explicit escalation — always confirm.
     lab_root = (_NET_MODE == "lab" and not IS_WINDOWS
@@ -969,6 +1003,8 @@ def t_run_shell(args, approve):
 
     if danger:
         ok = approve(f"Run shell command — {danger}:\n    {command}", force=True)
+    elif power:
+        ok = approve(f"Run shell command — {power} (online):\n    {command}", force=True)
     elif lab_root:
         ok = approve(f"Run shell command AS ROOT in the lab:\n    {command}", force=True)
     else:
