@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Redcoder (Kali edition) launcher.
+# Resolves its own directory even when invoked through a symlink in /usr/local/bin,
+# so `redcoder` works from any working directory while still editing files there.
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec python3 "$HERE/redcoder.py" "$@"

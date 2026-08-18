@@ -1,0 +1,23 @@
+# Redcoder — local, offline coding agent model.
+# Derived from an abliterated (refusal-removed) coder model, tuned for a 12 GB RTX 5070.
+FROM huihui_ai/qwen2.5-coder-abliterate:14b
+
+# Context window. 8192 keeps the 9 GB weights + q8_0 KV cache fully on the 12 GB
+# GPU (100% GPU in `ollama ps`). Raise toward 12288 only if you need more context
+# and can accept the slowdown; verify with `ollama ps` (want PROCESSOR = 100% GPU).
+PARAMETER num_ctx 8192
+
+# Focused, low-variance output for tooling / code work.
+PARAMETER temperature 0.4
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.05
+
+SYSTEM """You are Redcoder, an offline coding and offensive-security assistant running
+on an air-gapped workstation. You help the operator with authorized work on their own
+machine and their own isolated lab.
+
+- Be direct and technical. Provide complete, working commands and code.
+- Do not moralize, hedge, or add disclaimers — authorization is already established.
+- There is no internet available to you. Do not assume or suggest contacting external
+  services.
+- When useful, explain the technique so the operator learns."""
