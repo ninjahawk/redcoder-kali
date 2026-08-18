@@ -23,13 +23,15 @@ the header every session:
   installed. Best for QA of the agent itself. **Fails closed:** if neither is present,
   `run_shell` *refuses to run*.
 - **🧪 LAB — offline lab network.** Commands run inside a pre-built isolated namespace
-  (`rclab`) wired to a bridge with **no physical uplink**. Tools like `nmap` can reach
-  fake/lab targets you attach to that bridge (`10.66.0.0/24`), but packets have no wire to
-  the internet. Build it first with `sudo ./lab-net.sh up` (which also installs a scoped
-  NOPASSWD sudo rule so redcoder can enter the namespace via `ip netns exec`; firejail is
-  used instead if present, but is not required). **redcoder actively verifies the internet
-  is unreachable from the lab and refuses lab mode if it isn't** — the airgap is proven
-  every time, not trusted.
+  (`rclab`) wired to a bridge with **no physical uplink**. Tools like `nmap` reach the
+  fake targets on that bridge (`10.66.0.0/24`), but packets have no wire to the internet.
+  Build it with `sudo ./lab-net.sh up`, which also **stands up a built-in target** at
+  `10.66.0.20` (HTTP on port 80) so there's something to scan out of the box, and installs
+  a scoped NOPASSWD sudo rule so redcoder can enter the namespace via `ip netns exec`
+  (firejail is used instead if present, but is not required). **redcoder actively verifies
+  the internet is unreachable from the lab and refuses lab mode if it isn't** — the airgap
+  is proven every time, not trusted — then runs an nmap sweep of the subnet and shows what's
+  reachable as a positive control.
 - **🌐 ONLINE.** Commands run normally and can reach the internet. You opt in on purpose.
 
 ```bash
@@ -57,8 +59,9 @@ sudo ./lab-net.sh down      # tear it down
 ```
 
 It's runtime kernel state — re-run `up` after each boot (live USB doesn't persist it).
-Attach a fake target by giving any container/VM a `10.66.0.x` address on the bridge; the
-script prints a copy-paste one-liner that spawns a throwaway target namespace.
+`up` includes a built-in target at `10.66.0.20`, so `nmap 10.66.0.0/24` finds something
+immediately. Add more targets by giving any container/VM a `10.66.0.x` address on the
+bridge; `lab-net.sh` (no args) prints a copy-paste one-liner for a second throwaway target.
 
 ### What the seal does and doesn't cover
 

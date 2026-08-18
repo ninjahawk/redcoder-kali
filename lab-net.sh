@@ -34,6 +34,14 @@ NS_IP="10.66.0.10/24"
 VETH_NS="veth-rclab"          # end inside the namespace
 VETH_BR="veth-rclab-br"       # end on the bridge
 
+# A built-in fake target so `--lab` has something to scan out of the box. It is a
+# SECOND isolated namespace on the same uplink-less bridge — still no internet.
+TGT_NS="rclab-t1"
+TGT_IP="10.66.0.20/24"
+TGT_ADDR="10.66.0.20"
+TGT_VETH_NS="veth-t1"         # end inside the target namespace
+TGT_VETH_BR="veth-t1-br"      # end on the bridge
+
 say()  { printf '\n\033[1;31m==>\033[0m \033[1m%s\033[0m\n' "$1"; }
 ok()   { printf '    \033[32m%s\033[0m\n' "$1"; }
 warn() { printf '    \033[33m! %s\033[0m\n' "$1"; }
@@ -84,12 +92,54 @@ up() {
   # 10.66.0.0/24 and nothing else.
   ok "no default route, no NAT — lab reaches $SUBNET only"
 
+  # Stand up the built-in fake target so `--lab` has something to scan immediately.
+  target_up
+
   # Let redcoder enter the namespace without a password prompt. Only used when
   # firejail is unavailable (Kali no longer ships it); scoped strictly to
   # `ip netns exec rclab ...`. Removed by `down`.
   install_sudoers
 
   verify
+}
+
+target_up() {
+  # A throwaway target namespace on the same bridge, serving HTTP on port 80 so a
+  # scan finds an open port — never anything but a lab host, no uplink.
+  if ip netns list | awk '{print $1}' | grep -qx "$TGT_NS"; then
+    ok "target namespace '$TGT_NS' already exists"
+  else
+    ip netns add "$TGT_NS"
+    ip link add "$TGT_VETH_BR" type veth peer name "$TGT_VETH_NS"
+    ip link set "$TGT_VETH_NS" netns "$TGT_NS"
+    ip link set "$TGT_VETH_BR" master "$BR"
+    ip link set "$TGT_VETH_BR" up
+    ip netns exec "$TGT_NS" ip addr add "$TGT_IP" dev "$TGT_VETH_NS"
+    ip netns exec "$TGT_NS" ip link set "$TGT_VETH_NS" up
+    ip netns exec "$TGT_NS" ip link set lo up
+    ok "created fake target '$TGT_NS' ($TGT_ADDR)"
+  fi
+
+  # Start (or restart) a tiny HTTP service inside the target, fully detached so it
+  # survives this script exiting. `ip netns pids` lets `down` reap it cleanly.
+  if ip netns pids "$TGT_NS" 2>/dev/null | grep -q .; then
+    ok "target service already running on $TGT_ADDR:80"
+  elif have python3; then
+    ip netns exec "$TGT_NS" setsid python3 -m http.server 80 --bind "$TGT_ADDR" \
+      >/tmp/redcoder-rclab-t1.log 2>&1 < /dev/null &
+    disown 2>/dev/null || true
+    ok "started HTTP service on $TGT_ADDR:80 (log: /tmp/redcoder-rclab-t1.log)"
+  else
+    warn "python3 not found — target has no open ports (still discoverable by ARP)"
+  fi
+}
+
+target_down() {
+  if ip netns list | awk '{print $1}' | grep -qx "$TGT_NS"; then
+    ip netns pids "$TGT_NS" 2>/dev/null | xargs -r kill 2>/dev/null || true
+    ip netns del "$TGT_NS" && ok "deleted target namespace '$TGT_NS'"
+  fi
+  ip link del "$TGT_VETH_BR" 2>/dev/null && ok "removed target veth" || true
 }
 
 install_sudoers() {
@@ -109,6 +159,7 @@ install_sudoers() {
 
 down() {
   say "Tearing down the lab network"
+  target_down
   rm -f /etc/sudoers.d/redcoder-lab && ok "removed sudo rule" || true
   if ip netns list | awk '{print $1}' | grep -qx "$NS"; then
     ip netns del "$NS" && ok "deleted namespace '$NS' (its veth end went with it)"
@@ -178,23 +229,27 @@ case "${1:-}" in
     cat <<EOF
 lab-net.sh — offline lab network for redcoder --lab
 
-  sudo $0 up        build + verify the isolated lab net ($SUBNET)
+  sudo $0 up        build + verify the isolated lab net ($SUBNET), incl. a fake target
   sudo $0 verify    prove the internet is unreachable from the lab
   sudo $0 status    show namespace / bridge / attached targets
   sudo $0 down      tear it all down
 
-Attach a throwaway fake target (second namespace on the same bridge):
+`up` now also stands up a built-in fake target at $TGT_ADDR serving HTTP on port 80,
+so redcoder --lab has something to scan immediately:
 
-  sudo ip netns add rclab-t1
-  sudo ip link add veth-t1 type veth peer name veth-t1-br
-  sudo ip link set veth-t1 netns rclab-t1
-  sudo ip link set veth-t1-br master $BR
-  sudo ip link set veth-t1-br up
-  sudo ip netns exec rclab-t1 ip addr add 10.66.0.20/24 dev veth-t1
-  sudo ip netns exec rclab-t1 ip link set veth-t1 up
-  sudo ip netns exec rclab-t1 ip link set lo up
-  # start a service in it, e.g.:  sudo ip netns exec rclab-t1 python3 -m http.server 80
-  # then from redcoder --lab:     nmap 10.66.0.0/24    (finds 10.66.0.20, never the internet)
+      nmap 10.66.0.0/24     # finds $TGT_ADDR (never the internet)
+
+Add MORE throwaway targets by hand if you want a bigger lab (same bridge, $BR):
+
+  sudo ip netns add rclab-t2
+  sudo ip link add veth-t2 type veth peer name veth-t2-br
+  sudo ip link set veth-t2 netns rclab-t2
+  sudo ip link set veth-t2-br master $BR
+  sudo ip link set veth-t2-br up
+  sudo ip netns exec rclab-t2 ip addr add 10.66.0.21/24 dev veth-t2
+  sudo ip netns exec rclab-t2 ip link set veth-t2 up
+  sudo ip netns exec rclab-t2 ip link set lo up
+  sudo ip netns exec rclab-t2 python3 -m http.server 8080 --bind 10.66.0.21 &
 EOF
     ;;
 esac

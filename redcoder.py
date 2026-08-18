@@ -813,10 +813,42 @@ def _lab_egress_open():
         return False
 
 
+def _lab_scan_summary(timeout=30):
+    """Positive control: nmap-sweep the lab subnet and summarise what's reachable.
+
+    Purely informational — it runs AFTER the airgap gate has already passed and never
+    changes the safety decision. Returns a short one-line string, or None if nmap is
+    absent or the sweep can't run.
+    """
+    if LAB_NETNS not in _list_netns():
+        return None
+    prefix, jerr = _lab_join_prefix()
+    if jerr:
+        return None
+    if not shutil.which("nmap"):
+        return "nmap not installed — skipping lab scan (sudo apt install -y nmap)"
+    # Host-discovery sweep only: fast (ARP on the local L2), proves the lab is live.
+    try:
+        r = subprocess.run(prefix + ["nmap", "-n", "-sn", LAB_SUBNET],
+                           capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    hosts = re.findall(r"Nmap scan report for ([\d.]+)", r.stdout)
+    own = LAB_SUBNET.split("/")[0].rsplit(".", 1)[0] + ".10"   # rclab's own address
+    targets = [h for h in hosts if h != own]
+    if targets:
+        return f"lab scan: {len(targets)} target(s) up on {LAB_SUBNET} — " + ", ".join(targets)
+    return (f"lab scan: no targets found on {LAB_SUBNET} "
+            f"(run 'sudo ./lab-net.sh up' to stand up the built-in target)")
+
+
 def activate_lab():
     """Attempt to enter LAB mode, verifying the airgap. Returns (ok, message).
     Refuses (ok=False) unless the rclab namespace exists, we can actually enter it,
-    AND the internet is provably unreachable from inside it."""
+    AND the internet is provably unreachable from inside it.
+
+    On success it also runs an informational nmap sweep of the lab subnet and prints
+    what's reachable (a positive control — never part of the safety decision)."""
     if IS_WINDOWS:
         return False, "LAB mode is Linux-only."
     if LAB_NETNS not in _list_netns():
@@ -837,6 +869,10 @@ def activate_lab():
     if _lab_egress_open():
         return False, ("REFUSED — the internet is REACHABLE from the lab namespace; the "
                        "airgap is NOT holding. Fix ./lab-net.sh / routing before lab use.")
+    # Gate passed. Positive control: show what the lab can actually reach.
+    scan = _lab_scan_summary()
+    if scan:
+        print(dim("  " + scan))
     return True, (f"lab '{LAB_NETNS}' verified — reaches {LAB_SUBNET} targets, internet "
                   f"proven unreachable.")
 
