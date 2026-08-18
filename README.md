@@ -9,6 +9,37 @@ history file, and no telemetry — only the files you ask it to change.
 
 ---
 
+## Two network modes — sealed and online
+
+The agent process is offline by construction: it only ever talks to the local Ollama
+server on `127.0.0.1`. But the *shell commands the model runs* (`curl`, `nmap`, `apt`, ...)
+can reach the internet. So there are two deliberate modes, chosen explicitly and shown in
+the header every session:
+
+- **🔒 SEALED (default)** — every `run_shell` command runs inside a network namespace with
+  **no route off the machine**. It's not "asked not to" — there is no usable network stack
+  inside the command. This is enforced by `firejail --net=none`, or `unshare -rn` if
+  firejail isn't installed. **Fails closed:** if neither tool is present, `run_shell`
+  *refuses to run* rather than silently going online.
+- **🌐 ONLINE** — commands run normally and can reach the network. You opt in on purpose.
+
+```bash
+redcoder                 # sealed (default) — no internet for shell commands
+redcoder --online        # online — shell commands can reach the internet
+```
+
+Inside a session, `/net` shows the current mode and `/net sealed` / `/net online` switch
+it. The model is told which mode it's in, so while sealed it won't waste steps attempting
+downloads or remote scans. For QA testing, sealed is exactly right: the model can flail all
+it likes and physically cannot touch the network. Flip to online only for real work that
+needs it (Kali's remote tooling, package installs).
+
+The seal covers the model's shell commands, not a bug in `redcoder.py` itself — for that
+harder guarantee, run the whole thing in a container. It's a Linux feature; on the Windows
+build the flag exists but is not enforced (there's no firejail), and the header says so.
+
+---
+
 ## Quick start
 
 ```bash
@@ -176,14 +207,15 @@ tokens/sec, which is fine for verifying the setup and unusable for real work.
 ## Usage
 
 ```
-redcoder                                     interactive
+redcoder                                     interactive (SEALED — no internet)
+redcoder --online                            allow shell commands to reach the internet
 redcoder --dangerously-skip-permissions      never ask before writes/edits/shell
 redcoder -p "explain scan.py"                one-shot, print and exit
 git diff | redcoder -p "review this diff"    pipe via stdin
 redcoder -m some-other-model                 different Ollama model
 ```
 
-In-session commands: `/help`, `/model`, `/clear`, `/save`, `/resume`, `/auto`, `/cwd`.
+In-session commands: `/help`, `/model`, `/net`, `/clear`, `/save`, `/resume`, `/auto`, `/cwd`.
 `Ctrl-C` interrupts the current turn without losing context.
 
 `/save` writes `./redcoder.md` — the one place Redcoder deliberately puts conversation

@@ -10,7 +10,10 @@ This build is tuned for running from a Kali Linux live USB with persistence,
 against a 12 GB GPU. See README.md for the one-time setup.
 
 Design goals:
-  * OFFLINE   — talks only to 127.0.0.1:11434 (local Ollama). No internet.
+  * OFFLINE   — the agent talks only to 127.0.0.1:11434 (local Ollama). Shell
+                commands run in one of two DELIBERATE network modes: SEALED
+                (default — commands have NO network, enforced by a sandbox) or
+                ONLINE (opt in with --online / /net online). See README.md.
   * NO LOGS   — writes nothing to disk except the files YOU ask it to change.
                 No transcript, no history file, no telemetry. Memory-only.
   * SELF-CONTAINED — Python standard library only. No pip installs.
@@ -24,6 +27,10 @@ Flags (Claude-Code style):
     -y, --auto,
     --dangerously-skip-permissions  auto-approve ALL writes/edits/shell — no prompts
     -m, --model NAME                use a different Ollama model (default: redcoder)
+    --sealed, --offline             SEALED network mode (default): shell commands
+                                    have NO internet — enforced by a sandbox
+    --online                        ONLINE network mode: shell commands CAN reach
+                                    the internet. Deliberate opt-in.
     -C, --cwd DIR                   start in DIR instead of the current directory
     --no-color                      plain output, no ANSI colors
     --no-voice                      disable hold-Space-to-talk voice input
@@ -117,6 +124,17 @@ STOP_TOOL_WORDS = {"stop", "done", "finish", "finished", "end", "complete", "com
 # Never persist anything. Belt-and-braces: disable Ollama's REPL history too
 # (we use the HTTP API so this is moot, but it costs nothing to be explicit).
 os.environ.setdefault("OLLAMA_NOHISTORY", "1")
+
+# Network mode. Two deliberate states, never ambiguous:
+#   SEALED (default) — every run_shell command runs inside a network-isolated
+#                      sandbox (firejail --net=none, or unshare -rn). The command
+#                      has no route to the internet: not "asked not to", but no
+#                      usable network stack. FAILS CLOSED — if no sandbox tool is
+#                      present, run_shell refuses rather than silently going online.
+#   ONLINE           — commands run normally and can reach the network. Opt in with
+#                      --online or /net online.
+# Flip at launch (--sealed/--online) or in-session (/net sealed | /net online).
+NET_SEALED_DEFAULT = True
 
 IS_WINDOWS = os.name == "nt"
 SHELL_LABEL = "PowerShell" if IS_WINDOWS else "bash"
@@ -236,6 +254,22 @@ root, and say why when you do.
 if not IS_WINDOWS:
     SYSTEM_PROMPT = SYSTEM_PROMPT.rstrip() + "\n" + KALI_NOTES
 
+
+def build_system():
+    """SYSTEM_PROMPT plus a line telling the model the current network mode, so it
+    does not waste steps attempting online work while sealed."""
+    if _SEALED:
+        net = ("# Network access\n"
+               "SEALED mode: shell commands run with NO network — any attempt to reach "
+               "the internet or a remote host WILL fail. Do only local work; do not try "
+               "downloads, apt installs, or remote scans. If a task genuinely needs "
+               "network, say so and tell the user to switch to online mode.")
+    else:
+        net = ("# Network access\n"
+               "ONLINE mode: shell commands can reach the network. Still prefer local "
+               "work — only go online when the task actually requires it.")
+    return SYSTEM_PROMPT.rstrip() + "\n\n" + net
+
 # --------------------------------------------------------------------------- #
 #  Terminal color
 # --------------------------------------------------------------------------- #
@@ -257,6 +291,7 @@ def _enable_vt():
 
 _enable_vt()
 _C = sys.stdout.isatty()
+_SEALED = NET_SEALED_DEFAULT   # current network mode; set in main(), toggled by /net
 
 
 def c(text, code):
@@ -673,6 +708,28 @@ def _dangerous_reason(command):
     return None
 
 
+def _sandbox_backend():
+    """How to run a shell command with NO network access (SEALED mode). Linux only.
+
+    Returns (prefix_argv, label):
+      prefix_argv  argv to prepend to the real command, or None if unavailable
+      label        "firejail" | "unshare" | "windows" | "none"
+    firejail is preferred (purpose-built, keeps an isolated loopback up); unshare
+    is the zero-install fallback (util-linux is always on Kali). Both put the
+    command in a fresh network namespace with no route off the machine.
+    """
+    if IS_WINDOWS:
+        return None, "windows"
+    fj = shutil.which("firejail")
+    if fj:
+        return [fj, "--quiet", "--net=none", "--"], "firejail"
+    un = shutil.which("unshare")
+    if un:
+        # -r: rootless user namespace (no sudo needed); -n: new net namespace (lo down).
+        return [un, "-rn", "--"], "unshare"
+    return None, "none"
+
+
 def t_run_shell(args, approve):
     command = args["command"]
     danger = _dangerous_reason(command)
@@ -682,13 +739,35 @@ def t_run_shell(args, approve):
         ok = approve(f"Run shell command:\n    {command}")
     if not ok:
         raise ToolError("User declined the command.")
-    spin = Spinner("running command", color=orange).start()
-    try:
-        if IS_WINDOWS:
-            argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+
+    if IS_WINDOWS:
+        argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    else:
+        # bash if present (Kali ships it), otherwise whatever /bin/sh is.
+        argv = [shutil.which("bash") or "/bin/sh", "-lc", command]
+
+    # SEALED mode: wrap the command so it physically has no network. Fail closed —
+    # never silently run un-sealed when the user asked for sealed.
+    sealed_label = None
+    if _SEALED:
+        prefix, backend = _sandbox_backend()
+        if backend == "windows":
+            print(yellow("    ⚠ network seal is Linux-only and is NOT enforced on "
+                         "Windows — this command may reach the internet"))
+        elif backend == "none":
+            raise ToolError(
+                "SEALED (offline) mode is on, but no sandbox mechanism is available "
+                "to enforce it (need `firejail` or `unshare`). Refusing to run so "
+                "nothing reaches the network unexpectedly. Install one "
+                "(`sudo apt install -y firejail`) or deliberately switch to online "
+                "mode with `/net online`.")
         else:
-            # bash if present (Kali ships it), otherwise whatever /bin/sh is.
-            argv = [shutil.which("bash") or "/bin/sh", "-lc", command]
+            argv = prefix + argv
+            sealed_label = backend
+
+    spin = Spinner("running command" + (" · sealed" if sealed_label else ""),
+                   color=orange).start()
+    try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=600,
         )
@@ -1396,6 +1475,8 @@ Commands (type inside the session):
   /save              write a ./redcoder.md checkpoint of this session (manual)
   /resume            load a ./redcoder.md checkpoint back into context
   /auto              toggle auto-approve for writes/edits/shell
+  /net [MODE]        network mode: /net (status), /net sealed (no internet),
+                     /net online (allow internet)
   /model [NAME]      pick a model from a menu (or /model NAME to switch directly)
   /cwd [PATH]        show or change the working directory
   /exit, /quit       leave (Ctrl-C also works)
@@ -1622,10 +1703,11 @@ def input_bar(model, prefill=None):
 
 
 def main(argv):
-    global _C, _VOICE
+    global _C, _VOICE, _SEALED
     auto = False
     print_mode = False
     no_voice = False
+    sealed = NET_SEALED_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
     start_parts = []
@@ -1636,6 +1718,10 @@ def main(argv):
             auto = True
         elif a == "--no-voice":
             no_voice = True
+        elif a in ("--sealed", "--offline"):
+            sealed = True
+        elif a == "--online":
+            sealed = False
         elif a in ("-p", "--print"):
             print_mode = True
         elif a in ("-m", "--model") and i + 1 < len(argv):
@@ -1656,6 +1742,8 @@ def main(argv):
         else:
             start_parts.append(a)
         i += 1
+
+    _SEALED = sealed
 
     if start_cwd:
         try:
@@ -1680,7 +1768,7 @@ def main(argv):
         if not ok:
             print(status)
             return 1
-        messages = [{"role": "system", "content": SYSTEM_PROMPT},
+        messages = [{"role": "system", "content": build_system()},
                     {"role": "user", "content": prompt}]
         try:
             agent_turn(model, messages, Approver(auto))
@@ -1701,6 +1789,18 @@ def main(argv):
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
+    if _SEALED:
+        print(green("  🔒 SEALED — shell commands have NO network"
+                    + ("" if w < 62 else " (offline; enforced by sandbox)")))
+        if not IS_WINDOWS:
+            _, backend = _sandbox_backend()
+            if backend == "none":
+                print(red("  ⚠ no firejail/unshare found — shell commands will REFUSE "
+                          "to run until one is installed (sudo apt install -y firejail)"))
+        elif IS_WINDOWS:
+            print(yellow("  ⚠ seal is Linux-only; not enforced on Windows"))
+    else:
+        print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
     if _VOICE:
         print(pink("  🎤 hold ") + bold(pink("Space")) + pink(" at an empty prompt to talk")
               + dim("  (offline Whisper)"))
@@ -1715,7 +1815,7 @@ def main(argv):
     print()
 
     approver = Approver(auto)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": build_system()}]
     pending = prompt
 
     while True:
@@ -1740,7 +1840,7 @@ def main(argv):
             if cmd == "help":
                 print(HELP); continue
             if cmd in ("reset", "clear"):
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                messages = [{"role": "system", "content": build_system()}]
                 print(dim("  conversation cleared.")); continue
             if cmd == "save":
                 if len(messages) <= 1:
@@ -1766,6 +1866,38 @@ def main(argv):
             if cmd == "auto":
                 approver.auto = not approver.auto
                 print(dim(f"  auto-approve {'ON' if approver.auto else 'OFF'}.")); continue
+            if cmd == "net":
+                arg = rest.strip().lower()
+                if arg in ("", "status"):
+                    if _SEALED:
+                        _, backend = _sandbox_backend()
+                        how = ("Windows: NOT enforced" if backend == "windows"
+                               else "no sandbox found — commands will refuse to run"
+                               if backend == "none" else f"enforced via {backend}")
+                        print(green(f"  🔒 SEALED — shell commands have NO network  ({how})"))
+                    else:
+                        print(yellow("  🌐 ONLINE — shell commands CAN reach the internet"))
+                    print(grey("  /net sealed  = no internet   ·   /net online = allow internet"))
+                elif arg in ("sealed", "offline", "off"):
+                    if _SEALED:
+                        print(dim("  already SEALED.")); continue
+                    _SEALED = True
+                    messages.append({"role": "system", "content":
+                        "NETWORK MODE CHANGED to SEALED: shell commands now have NO network. "
+                        "Online attempts will fail; do local work only."})
+                    print(green("  🔒 now SEALED — shell commands have NO network."))
+                elif arg in ("online", "on"):
+                    if not _SEALED:
+                        print(dim("  already ONLINE.")); continue
+                    _SEALED = False
+                    messages.append({"role": "system", "content":
+                        "NETWORK MODE CHANGED to ONLINE: shell commands can now reach the "
+                        "network. Still prefer local work; go online only when required."})
+                    print(yellow("  🌐 now ONLINE — shell commands CAN reach the internet."))
+                    print(red("  ⚠ the offline guarantee is off until you /net sealed again."))
+                else:
+                    print(yellow(f"  usage: /net [status|sealed|online]"))
+                continue
             if cmd in ("model", "models"):
                 choice = rest.strip() or pick_model(model)
                 if choice:
