@@ -2115,41 +2115,121 @@ def _do_voice():
     return text
 
 
-def read_input():
-    """Raw-mode line reader with hold-Space-to-talk. The prompt is already printed.
-    Space held at an EMPTY line starts voice; otherwise Space types normally."""
-    buf = ""
-    while True:
-        if not buf and _key_down(VK_SPACE):        # possible push-to-talk
-            time.sleep(0.12)                        # confirm it's a hold, not a tap
-            while msvcrt.kbhit():                    # drain the queued space char(s)
-                if msvcrt.getwch() not in (" ",):
-                    pass
-            if _key_down(VK_SPACE):
-                text = _do_voice()
-                if text.strip():
-                    print(green("  ▸ heard: ") + text)
-                    return text
-                sys.stdout.write(grey("│ ") + green("› ") + buf); sys.stdout.flush()
-            continue
-        if msvcrt.kbhit():
-            ch = msvcrt.getwch()
+def _wrap_words(text, width):
+    """Word-wrap `text` to `width` columns for display. WHOLE words move to the next line;
+    a single word longer than `width` is hard-broken (so nothing overflows). Returns a list
+    of display lines (always >= 1)."""
+    if width < 1:
+        width = 1
+    lines = []
+    for para in text.split("\n"):
+        cur = ""
+        for word in para.split(" "):
+            while len(word) > width:                 # unbreakable run wider than a line
+                if cur:
+                    lines.append(cur); cur = ""
+                lines.append(word[:width]); word = word[width:]
+            if cur == "":
+                cur = word
+            elif len(cur) + 1 + len(word) <= width:
+                cur += " " + word
+            else:
+                lines.append(cur); cur = word
+        lines.append(cur)
+    return lines or [""]
+
+
+def _getch():
+    """One keystroke. Windows: non-blocking (None if nothing waiting, so we can poll for
+    push-to-talk). POSIX: blocking read of one char (terminal already in raw mode)."""
+    if IS_WINDOWS:
+        if msvcrt and msvcrt.kbhit():
+            return msvcrt.getwch()
+        return None
+    return sys.stdin.read(1)
+
+
+def _read_boxed(W, prefill=""):
+    """Re-rendering, word-wrapped, fully-framed input editor (append + backspace + enter).
+    Every wrapped line is boxed and aligned; a whole word drops to the next line rather than
+    splitting. On Windows, holding Space at an empty prompt starts push-to-talk. The top
+    border is already printed; this draws the content lines + bottom border and returns the
+    typed text. Best when the box fits on screen; very tall boxes near the bottom may scroll."""
+    tw = max(4, W - 6)                 # inner text width:  "│ " + prefix(2) + text + " │"
+    buf = prefill or ""
+    rows = [0]                         # content rows drawn on the previous render
+
+    def render():
+        disp = _wrap_words(buf, tw)
+        out = []
+        if rows[0]:                    # from end-of-text (last row) back up to the first row
+            up = rows[0] - 1
+            if up > 0:
+                out.append(f"\x1b[{up}A")
+            out.append("\r")
+        out.append("\x1b[J")           # clear old content + bottom border
+        for i, ln in enumerate(disp):
+            prefix = green("› ") if i == 0 else "  "
+            out.append(grey("│ ") + prefix + ln.ljust(tw) + grey(" │") + "\r\n")
+        out.append(grey("╰" + "─" * max(0, W - 2) + "╯"))     # bottom border
+        out.append("\x1b[1A\r")                                # up to the last content row
+        out.append(f"\x1b[{4 + len(disp[-1])}C")               # to just past the last char
+        sys.stdout.write("".join(out)); sys.stdout.flush()
+        rows[0] = len(disp)
+
+    def finish():
+        sys.stdout.write("\x1b[1B\r\n"); sys.stdout.flush()    # drop below the closed box
+
+    old = None
+    if not IS_WINDOWS:
+        try:
+            import termios, tty
+            fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)
+        except Exception:
+            old = None
+    try:
+        render()
+        while True:
+            if not buf and IS_WINDOWS and _VOICE and _key_down(VK_SPACE):
+                time.sleep(0.12)
+                while msvcrt and msvcrt.kbhit():
+                    msvcrt.getwch()
+                if _key_down(VK_SPACE):
+                    text = _do_voice()
+                    if text.strip():
+                        finish(); print(green("  ▸ heard: ") + text); return text
+                continue
+            ch = _getch()
+            if ch is None:
+                time.sleep(0.008); continue
             if ch in ("\r", "\n"):
-                sys.stdout.write("\n"); return buf
+                finish(); return buf
             if ch == "\x03":
                 raise KeyboardInterrupt
-            if ch in ("\x00", "\xe0"):              # arrow/function key → consume 2nd byte
-                msvcrt.getwch(); continue
-            if ch == "\x08":                          # backspace
+            if ch in ("\x00", "\xe0"):                 # Windows special key → drop 2nd byte
+                if msvcrt:
+                    msvcrt.getwch()
+                continue
+            if ch == "\x1b":                            # POSIX escape seq (arrows) → drain
+                try:
+                    import select
+                    while select.select([sys.stdin], [], [], 0.0)[0]:
+                        sys.stdin.read(1)
+                except Exception:
+                    pass
+                continue
+            if ch in ("\x08", "\x7f"):                  # backspace / DEL — re-wrap handles lines
                 if buf:
-                    buf = buf[:-1]; sys.stdout.write("\b \b"); sys.stdout.flush()
+                    buf = buf[:-1]; render()
                 continue
-            if ch == " " and not buf:                 # leading space is meaningless; reserve for voice
-                continue
+            if ch == " " and not buf and IS_WINDOWS and _VOICE:
+                continue                                # reserve empty-prompt Space for voice
             if ch >= " ":
-                buf += ch; sys.stdout.write(ch); sys.stdout.flush()
-            continue
-        time.sleep(0.008)
+                buf += ch; render()
+    finally:
+        if old is not None:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
 
 
 def _term_width(default=80):
@@ -2188,19 +2268,10 @@ def input_bar(model, prefill=None):
     else:
         header = grey("╭ ")
         hlen = 2
-    bottom = grey("╰" + "─" * max(0, w - 2) + "╯")
     print(header + grey("─" * max(0, w - hlen - 1) + "╮"))
-    if prefill is not None:
-        print(grey("│ ") + green("› ") + prefill)
-        print(bottom)
-        return prefill
-    if _VOICE:
-        sys.stdout.write(grey("│ ") + green("› ")); sys.stdout.flush()
-        text = read_input()
-    else:
-        text = input(grey("│ ") + green("› "))
-    print(bottom)
-    return text
+    # The editor draws the content line(s) + closing bottom border, word-wrapping inside the
+    # frame and keeping backspace working across wrapped lines.
+    return _read_boxed(w, prefill=prefill or "")
 
 
 def main(argv):
