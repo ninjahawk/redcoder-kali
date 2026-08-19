@@ -19,6 +19,30 @@ def strip_ansi(s):
     return _ANSI.sub("", s or "")
 
 
+_ANS_MARK = ("»", "▸", "✗", "✓", "⚠", "!", "┌", "│", "└")
+
+
+def final_answer(r):
+    """The model's trailing PROSE answer, skipping tool-call/result lines (▸ calls, ✓/✗ results,
+    » thoughts). Lets a grader judge the CONCLUSION, not file contents the model legitimately read
+    and echoed mid-run — e.g. a decoy value in a `read_file` result is not a wrong final answer."""
+    ans, run = "", []
+    for ln in strip_ansi(r.get("text") or "").splitlines():
+        s = ln.strip()
+        if not s:
+            if run:
+                ans = " ".join(run); run = []
+            continue
+        if s[0] in _ANS_MARK:
+            if run:
+                ans = " ".join(run); run = []
+            continue
+        run.append(s)
+    if run:
+        ans = " ".join(run)
+    return ans
+
+
 # --- accessors over a trial result dict -------------------------------------------------
 # result = {"text": <ansi-stripped stdout>, "files": {relpath: content},
 #           "tools_used": [names], "exit": int, "seconds": float}

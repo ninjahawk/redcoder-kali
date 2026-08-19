@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 
 # task ids whose grader reads result["files"] — cannot re-grade from text ("ALL" = whole set is file-based)
 FILE_BASED = {
-    "tasks_judgment": {"wf_scan_dump", "traj_db_refs", "traj_distract", "traj_chain"},
+    "tasks_judgment": {"wf_scan_dump", "traj_db_refs", "traj_chain"},   # traj_distract is text-based
     "tasks_fileops": "ALL", "tasks_recovery": "ALL", "tasks_robustness": "ALL",
     "tasks_cmdwrite": set(), "tasks_router": set(),
 }

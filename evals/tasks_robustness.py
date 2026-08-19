@@ -7,7 +7,7 @@ Deterministic file/answer graders, --no-shell, throwaway workspace, platform-agn
 Self-test: `python tasks_robustness.py`.
 """
 import os
-from judge import has, has_any, file_get, file_has
+from judge import has, has_any, final_answer, file_get, file_has
 
 
 def _w(wd, name, content):
@@ -27,8 +27,10 @@ def _c_count(r):
     return (1.0 if ok else 0.0, f"answered 3:{ok}")
 
 def _c_key(r):
-    ok = has(r, "LIVE-KEY-7731") and not has_any(r, "DECOY")
-    return (1.0 if ok else 0.0, f"found live key, no decoy:{ok}")
+    # Don't fail because a decoy string appears in the transcript (the model may legitimately read
+    # decoy files). Judge the conclusion: found the live key, and the answer tail isn't a decoy.
+    ok = has(r, "LIVE-KEY-7731") and "DECOY" not in final_answer(r).upper()
+    return (1.0 if ok else 0.0, f"named live key, no decoy in answer:{ok}")
 
 def _c_port(r):
     c = file_get(r, "config.txt") or ""
