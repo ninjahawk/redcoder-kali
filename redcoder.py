@@ -83,7 +83,7 @@ except ImportError:
 VERSION = "1.0"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TAGS_URL = "http://127.0.0.1:11434/api/tags"
-DEFAULT_MODEL = "drago"   # a key in MODEL_REGISTRY below; /model switches or installs others
+DEFAULT_MODEL = "leviathan"   # a key in MODEL_REGISTRY below; /model switches or installs others
 
 # Dragon roster (see MODELS.md). Each friendly name maps to the actual abliterated Ollama
 # model redcoder runs. redcoder sends its own system prompt + sampling options every call, so
@@ -2276,6 +2276,11 @@ def main(argv):
     else:
         print("\n" + bold(red("  R E D C O D E R")) + "\n")
     ok, status = preflight(model)
+    if not ok and model in MODEL_REGISTRY:
+        # The default/selected model isn't installed yet — offer to download it (and free
+        # space if the disk is tight) so a fresh stick isn't stuck on a missing model.
+        if ensure_installed(model):
+            ok, status = preflight(model)
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))

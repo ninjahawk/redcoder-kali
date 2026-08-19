@@ -7,8 +7,12 @@ model's *character* (size, speed, capability), not just sound cool.
 
 | Name | Base (abliterated) | ~Disk | Character |
 |---|---|---|---|
-| **drago** | `huihui_ai/qwen2.5-coder-abliterate:14b` | 9 GB | Young dragon. 14B coder — fast & light baseline (~61 tok/s, snappy prefill). |
-| **leviathan** | `huihui_ai/Qwen3.8-abliterated:27b` | 18 GB | Colossal, powerful, *ponderous*. 27B **dense** — most capable, but ~9–10 tok/s and slow prefill (~230 t/s). The "slow but smart" Opus-style pick. |
+| **leviathan** ⭐ | `huihui_ai/Qwen3.8-abliterated:27b` | 18 GB | **Default.** Colossal, powerful, *ponderous*. 27B **dense** — most capable, but ~9–10 tok/s and slow prefill (~230 t/s). The "slow but smart" Opus-style pick. |
+| **drago** | `huihui_ai/qwen2.5-coder-abliterate:14b` | 9 GB | Young dragon. 14B coder — fast & light (~61 tok/s, snappy prefill). The fast alternative when you want speed over raw capability. |
+
+`DEFAULT_MODEL` in `redcoder.py` = **leviathan**. On a fresh machine where it isn't installed
+yet, redcoder offers to download it on launch (and to free space by removing another model if
+the disk is tight). Switch anytime with `/model`.
 
 ## Reserved for future models (approved names)
 
