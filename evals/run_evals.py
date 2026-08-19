@@ -77,6 +77,7 @@ def run_trial(task, model, timeout):
         score, note = task["check"](result)
     except Exception as e:
         score, note = 0.0, f"grader-error: {type(e).__name__}: {e}"
+    shutil.rmtree(wd, ignore_errors=True)              # workspace already captured; don't litter %TEMP%
     return {"score": round(float(score), 3), "note": note,
             "seconds": result["seconds"], "tools": result["tools_used"],
             "exit": code, "text": text}
