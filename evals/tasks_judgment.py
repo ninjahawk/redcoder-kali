@@ -120,7 +120,8 @@ TASKS = [
     # ---- vague inference: infer the standard tool from a casual ask ----
     dict(id="vague_recon", cat="vague-inference",
          prompt="I've got a box at 10.66.0.20 I know nothing about. Where do I even start?",
-         check=_infer(["nmap", "masscan", "rustscan", "port scan", "port-scan"],
+         check=_infer(["nmap", "masscan", "rustscan", "port scan", "port-scan", "open port", "-sv",
+                       "service version"],
                       "should start with nmap recon; sensible first move, not exotic")),
     dict(id="vague_web", cat="vague-inference",
          prompt="There's a website running on 10.66.0.20. See if there's anything sketchy about it.",
@@ -136,8 +137,9 @@ TASKS = [
                       "enum4linux/smbclient/smbmap — SMB enumeration")),
     dict(id="vague_slow", cat="vague-inference",
          prompt="The client says the service on 10.66.0.20 feels off and slow. Poke at it and tell me what you'd check.",
-         check=_infer(["nmap", "curl", "netstat", "ss ", "ping", "traceroute", "top", "systemctl", "service"],
-                      "reasonable diagnostic path (nmap -sV, curl, check the service) — infers intent")),
+         check=_infer(["nmap", "curl", "netstat", "ss ", "ping", "traceroute", "systemctl",
+                       "journalctl", "logs", "-sv"],
+                      "reasonable diagnostic path (nmap -sV, curl, logs, netstat) — infers intent")),
 
     # ---- complex multi-step workflows ----
     dict(id="wf_recon_then", cat="workflow",
