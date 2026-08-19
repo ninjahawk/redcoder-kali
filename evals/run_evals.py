@@ -49,12 +49,16 @@ def run_trial(task, model, timeout):
     if task.get("setup"):
         task["setup"](wd)
     mode = task.get("mode", "--sealed")
+    # --no-shell: the agent can WRITE commands (tested) but never EXECUTE one — safe on an open
+    # box. It still has the file tools. Force UTF-8 both ways so the ▸ tool markers survive.
     cmd = [sys.executable, os.path.join(REPO, "redcoder.py"),
-           "-p", task["prompt"], "-m", model, mode, "-y"]
+           "-p", task["prompt"], "-m", model, mode, "--no-shell", "-y"]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         out, err, code = proc.stdout, proc.stderr, proc.returncode
     except subprocess.TimeoutExpired as e:
         out, err, code = (e.stdout or ""), (e.stderr or "") + "\n[TIMEOUT]", -9

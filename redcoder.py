@@ -375,6 +375,8 @@ def _enable_vt():
 _enable_vt()
 _C = sys.stdout.isatty()
 _NET_MODE = NET_MODE_DEFAULT   # "sealed" | "lab" | "online"; set in main(), toggled by /net
+_NO_SHELL = False              # --no-shell: refuse run_shell entirely (safe automated testing
+                               # on an open box — the model can still write commands as text)
 
 
 def c(text, code):
@@ -1060,6 +1062,10 @@ def activate_lab():
 
 def t_run_shell(args, approve):
     command = args["command"]
+    if _NO_SHELL:
+        raise ToolError("run_shell is DISABLED in this session (safe/testing mode). Do not run "
+                        "commands. Use the file tools for local work; if you were asked to "
+                        "provide a command, output it as plain text in your answer instead.")
     danger = _dangerous_reason(command)
 
     # Powerful/offensive tools are RED only in online mode (where they reach real
@@ -2284,10 +2290,11 @@ def input_bar(model, prefill=None):
 
 
 def main(argv):
-    global _C, _VOICE, _NET_MODE
+    global _C, _VOICE, _NET_MODE, _NO_SHELL
     auto = False
     print_mode = False
     no_voice = False
+    no_shell = False
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
@@ -2299,6 +2306,8 @@ def main(argv):
             auto = True
         elif a == "--no-voice":
             no_voice = True
+        elif a == "--no-shell":
+            no_shell = True
         elif a in ("--sealed", "--offline", "--airgap"):
             net_mode = "sealed"
         elif a in ("--lab", "--offline-lab"):
@@ -2327,6 +2336,7 @@ def main(argv):
         i += 1
 
     _NET_MODE = net_mode
+    _NO_SHELL = no_shell
 
     if start_cwd:
         try:
