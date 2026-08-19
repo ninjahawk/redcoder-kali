@@ -279,9 +279,10 @@ guess: briefly state 2-3 options and ask, then act on the answer.
 
 # Filled in after the fact because SYSTEM_PROMPT contains literal { } braces,
 # which would break an f-string.
-SYSTEM_PROMPT = (SYSTEM_PROMPT
-                 .replace("__OS_LABEL__", OS_LABEL)
-                 .replace("__SHELL_LABEL__", SHELL_LABEL))
+# NOTE: __OS_LABEL__ / __SHELL_LABEL__ stay as placeholders here and are substituted per-call in
+# build_system() from the effective context (kali_ctx) — NOT baked in from IS_WINDOWS. This is
+# what keeps --kali-notes on a Windows box self-consistent ("Kali Linux / bash") instead of
+# leaking "PowerShell" into a Kali-context prompt. Real Kali and real Windows are unchanged.
 
 # Appended only on Linux. Kali ships a large native toolkit and runs here from a live
 # USB, both of which change what good behaviour looks like.
@@ -369,8 +370,12 @@ def build_system(model=None):
         net = ("# Network access\n"
                "ONLINE mode: shell commands can reach the network. Still prefer local "
                "work — only go online when the task actually requires it.")
-    base = SYSTEM_PROMPT.rstrip()
     kali_ctx = (not IS_WINDOWS) or _FORCE_KALI
+    os_label = "Kali Linux machine" if kali_ctx else "Windows PC"
+    shell_label = "bash" if kali_ctx else "PowerShell"
+    base = (SYSTEM_PROMPT.rstrip()
+            .replace("__OS_LABEL__", os_label)
+            .replace("__SHELL_LABEL__", shell_label))
     if kali_ctx:                             # Kali tool guidance on Linux, or when forced
         base += "\n" + KALI_NOTES
     env_note = ("# Environment\n"
