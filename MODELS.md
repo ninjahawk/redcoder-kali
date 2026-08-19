@@ -29,3 +29,18 @@ quetzalcoatl · basilisk · chimera · cerberus · ryujin
 > Rule of thumb: the *fast MoE* models (a3b) suit agile beast names; the *heavy dense*
 > models suit the colossal, ponderous ones (leviathan, jörmungandr). Let the name tell the
 > truth about the model, same as `leviathan` does.
+
+## Tool-routing (measured — see `evals/FINDINGS.md`)
+
+For *pure tool identification* ("which Kali tool + what command for this intent"), you do **not**
+need leviathan. Measured Kali tool-router accuracy (with Kali context, which the stick provides):
+
+| model | accuracy | why |
+|---|---|---|
+| **drago** 14B | **92%** (ties leviathan) | fast (~60 tok/s, 9 GB, all on GPU) — the efficient router |
+| qwen3-abliterated **8B** | 83% | 5 GB, very fast — viable ultralight router |
+| leviathan 27B | 92% | the ceiling, but slow/heavy — overkill for routing |
+
+So: **leviathan** for heavy reasoning/coding; **drago** (or an 8B) as a fast router when you only
+want the tool + command. Context matters more than size for routing — every model jumped once
+given Kali context.

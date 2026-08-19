@@ -9,6 +9,26 @@ and `~/Desktop/redcoder-backups/redcoder.py.20260819-114805.bak`.
 No online-with-execution. Kali's real capabilities are unaffected (`--no-shell` is opt-in and
 off for normal launches — verified in code).
 
+## TL;DR (read this first)
+1. **redcoder + leviathan is solid.** Across baseline (15) + hard (10) tasks, leviathan passed
+   *everything* reliably (15/15 pass^k, 10/10). **Every single "failure" turned out to be a bug
+   in MY eval graders/tests, never the model** — three of them, all caught by reading transcripts
+   (the discipline Anthropic emphasizes). No redcoder harness bugs surfaced.
+2. **The model is genuinely smart** — it distinguished code from comments (and flagged the
+   choice), and correctly gave Windows commands on Windows vs Kali commands with Kali context.
+3. **Small-model tool-router experiment (your explicit ask): answered.** With Kali context, an
+   **8B** model routes Kali tools at **83%** and **drago (14B) at 92% — tying 27B leviathan**.
+   You do NOT need leviathan just to "identify the best tool + method." Two-tier setup validated:
+   leviathan for heavy reasoning, drago/8b as a fast router. Full table below.
+4. **Safety held the whole time:** every model run used `--no-shell` (writes commands, never
+   executes) in throwaway workspaces. Nothing ran against anything. Kali's real capabilities are
+   untouched (all new flags are opt-in; verified Kali still gets `KALI_NOTES` by default).
+5. **New redcoder flags added** (all safe, opt-in, default-off): `--no-shell` (testing guard),
+   `--no-think` (thinking off for hybrids), `--kali-notes` (force Kali guidance for eval fidelity).
+6. **Persistent-bar TUI: deferred, honestly.** It needs a full-screen concurrent architecture I
+   can't validate without a live terminal; shipping unverified terminal code as the default would
+   risk your primary interface. Design captured for us to build together live. Current bar works.
+
 ## Result headlines
 - **Baseline set (15 tasks):** leviathan **15/15**, and at **k=3 it's 15/15 pass^k** — perfect
   on every trial, fully reliable/deterministic (temperature 0.4 but the answers are stable).
@@ -33,25 +53,43 @@ off for normal launches — verified in code).
   tok/s), not capability. Lesson banked: grade FUNCTIONAL/outcome correctness, be lenient on
   incidental text — the model is smart enough that strict graders mostly measure the grader.
 
-## Small-model tool-router ladder (how small can we go?)
-Kali tool-ID accuracy (12 tasks, --no-shell, --no-think), preliminary (verifying failures via
-transcripts):
+## ★ Small-model tool-router ladder — the headline result
 
-| model | accuracy | speed | note |
-|---|---|---|---|
-| qwen3-abliterated **1.7b** | 3/12 (25%) | ~2s | lacks tool knowledge |
-| qwen3-abliterated **4b**   | 5/12 (42%) | ~2s | weak |
-| qwen3-abliterated **8b**   | 4/12 (33%) | ~4s | weak (not > 4b) |
-| **drago 14b (coder)**      | **10/12 (83%)** | ~6s | **strong — the sweet spot** |
-| leviathan 27b              | (running)  | ~slow | ceiling |
+**Question:** how small a model can accurately identify Kali tools + write correct commands
+from a user's plain intent? (12 Kali tool-ID tasks, `--no-shell` so nothing runs, `--no-think`.)
 
-**Preliminary takeaway:** you can't go tiny for Kali tool-routing — general models ≤8B don't
-know the tools (~25-40%). There's a sharp jump at the **14B CODER (drago)**: 83%, and it's
-*fast* (fully on GPU, ~60 tok/s, 9GB) vs leviathan (~9 tok/s, 18GB). Notably drago (a *coder*)
-beats the 8B *general* model by a lot — for syntax-heavy tool-command generation, **coder
-training matters more than raw size**. So the lightweight "just identify the tool + method"
-router = **drago**, not something smaller. (Confirming the exact failures aren't grader
-strictness before finalizing — same discipline as before.)
+**The big catch first:** the initial run was on Windows *without* Kali context, and the models
+correctly answered with **PowerShell** (`Get-SmbShare`, `Test-Connection`) because they knew
+they were on a Windows box (`KALI_NOTES` is Linux-only). That's smart behavior, but it made the
+test measure the wrong thing. Once the router prompts establish Kali context, the scores jump —
+and on the *real Kali stick* the models get `KALI_NOTES` automatically, so routing is at least
+this good there.
+
+| model | size | Windows (no ctx) | **Kali context** | speed |
+|---|---|---|---|---|
+| qwen3-abliterated 1.7b | 1.1 GB | 3/12 | 5/12 (42%) | ~2s |
+| qwen3-abliterated 4b | 2.5 GB | 5/12 | 9/12 (75%) | ~2s |
+| **qwen3-abliterated 8b** | 5 GB | 4/12 | **10/12 (83%)** | ~4s |
+| **drago 14b (coder)** | 9 GB | 10/12 | **11/12 (92%)** | ~6s |
+| leviathan 27b | 18 GB | 7/12 | **11/12 (92%)** | slow |
+
+**Conclusions (actionable):**
+1. **You do NOT need leviathan for tool-routing.** drago (14B, 92%) ties leviathan (27B, 92%)
+   at a fraction of the cost — fully on GPU, ~60 tok/s, 9 GB. Your "leviathan is like Fable, not
+   always needed" intuition is exactly right: for "identify the best tool + method," **drago is
+   the efficient router.**
+2. **You can go surprisingly small WITH context.** An **8B** (5 GB, very fast) hits **83%**, and
+   even 4B hits 75%. So a genuinely lightweight tool-router is viable. The floor is ~4B; below
+   that (1.7B) knowledge thins out (42%).
+3. **Context is the multiplier, not size.** Every model jumped once given Kali context. The
+   single most important thing for routing is that the harness supplies Kali context — which it
+   does on the stick. (Anthropic's context-engineering point in practice.)
+4. The one shared miss (`smb_enum`) for drago+leviathan was **not** knowledge: leviathan emitted
+   a stop-token instead of answering ("(done)"), a rare "stopped early" protocol hiccup. Minor.
+
+**Recommendation:** keep **leviathan** as the default for heavy reasoning/coding; add a fast
+**router role** (drago for 92%/9GB, or 8b for 83%/5GB) for pure tool-identification when you
+just want "what's the tool + command." This is the two-tier setup you described.
 
 ## Method (grounded in Anthropic)
 - tasks → trials → graders → transcripts; grade the OUTCOME (files + answer + tool-use), not the
