@@ -24,6 +24,7 @@ from judge import strip_ansi                          # noqa: E402
 import importlib                                       # noqa: E402
 
 TEXT_EXT = {".txt", ".py", ".json", ".md", ".csv", ".cfg", ".ini", ".sh", ""}
+KALI_CTX = False                                      # --kali: force the real KALI_NOTES prompt
 
 
 def read_workspace(wd):
@@ -53,6 +54,8 @@ def run_trial(task, model, timeout):
     # box. It still has the file tools. Force UTF-8 both ways so the ▸ tool markers survive.
     cmd = [sys.executable, os.path.join(REPO, "redcoder.py"),
            "-p", task["prompt"], "-m", model, mode, "--no-shell", "--no-think", "-y"]
+    if KALI_CTX:
+        cmd.append("--kali-notes")             # faithful Kali system prompt (security-lab tasks)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     t0 = time.time()
     try:
@@ -89,10 +92,13 @@ def main():
     ap.add_argument("-k", type=int, default=1, help="trials per task")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--only", default="", help="comma-separated task ids to run")
-    ap.add_argument("--taskset", default="tasks", help="task module: tasks | tasks_hard | tasks_router")
+    ap.add_argument("--taskset", default="tasks", help="task module: tasks | tasks_hard | tasks_router | tasks_judgment")
+    ap.add_argument("--kali", action="store_true", help="force the real Kali system prompt (KALI_NOTES)")
     ap.add_argument("--outdir", default=os.path.join(HERE, "runs"))
     args = ap.parse_args()
 
+    global KALI_CTX
+    KALI_CTX = args.kali
     tasks_mod = importlib.import_module(args.taskset)
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     tasklist = [t for t in tasks_mod.TASKS if not only or t["id"] in only]
