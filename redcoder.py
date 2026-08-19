@@ -381,6 +381,9 @@ _NO_SHELL = False              # --no-shell: refuse run_shell entirely (safe aut
                                # on an open box — the model can still write commands as text)
 _NO_THINK = False              # --no-think: force thinking OFF for hybrid models (keeps the
                                # fenced-JSON tool protocol clean; used for eval fairness)
+_LIVE = False                  # --live: pinned bottom input bar with output scrolling above it
+                               # (Claude-Code-style); opt-in while it's validated. Default bar
+                               # (collapse-on-submit) stays the standard experience.
 
 
 def c(text, code):
@@ -2293,14 +2296,139 @@ def input_bar(model, prefill=None):
     return _read_boxed(w, prefill=prefill or "")
 
 
+class LiveScreen:
+    """--live: a bottom-pinned input bar with agent output scrolling ABOVE it, Claude-Code
+    style. Uses a DECSTBM scroll region so the bottom BAR_H rows never scroll. Stage 1:
+    single-line input, read blocks on your turn but the bar stays visible the whole time
+    (including while the agent works). Always reset the terminal via exit()."""
+    BAR_H = 3
+
+    def __init__(self, model):
+        self.model = model
+        self._sized()
+
+    def _sized(self):
+        try:
+            self.cols, self.rows = shutil.get_terminal_size((80, 24))
+        except Exception:
+            self.cols, self.rows = 80, 24
+        self.cols = max(24, self.cols); self.rows = max(8, self.rows)
+        self.scroll_bottom = self.rows - self.BAR_H     # last scrollable row (1-indexed)
+
+    def _w(self, s):
+        sys.stdout.write(s); sys.stdout.flush()
+
+    def enter(self):
+        self._sized()
+        self._w(f"\x1b[1;{self.scroll_bottom}r")         # confine scrolling to the top
+        self._w(f"\x1b[{self.scroll_bottom};1H")         # park cursor at the region bottom
+        self.draw_bar()
+
+    def exit(self):
+        self._w("\x1b[r")                                # release scroll region (whole screen)
+        self._w(f"\x1b[{self.rows};1H\n")
+
+    def to_scroll(self):
+        self._w(f"\x1b[{self.scroll_bottom};1H")         # so prints land above the bar
+
+    def emit_user(self, text):
+        self.to_scroll()
+        self._w(green("› ") + text + "\r\n")             # submitted msg as a chat line
+
+    def draw_bar(self, buf="", working=False):
+        cols = self.cols
+        tag = f"[{friendly_name(self.model)}]"
+        if len(f"╭─ redcoder · {tag} ") + 1 <= cols:
+            top = grey("╭─ ") + bold(red("redcoder")) + grey(" · ") + blue(tag) + " "
+            tlen = len(f"╭─ redcoder · {tag} ")
+        else:
+            top = grey("╭─ "); tlen = 3
+        top += grey("─" * max(0, cols - tlen - 1) + "╮")
+        avail = cols - 6                                  # "│ › " (4) + " " + "│"
+        shown = buf[-avail:] if len(buf) > avail else buf
+        if working:
+            mid = grey("│ ") + dim("… working  (Ctrl-C to interject)")
+        else:
+            mid = grey("│ ") + green("› ") + shown
+        bot = grey("╰" + "─" * max(0, cols - 2) + "╯")
+        r = self.scroll_bottom + 1
+        self._w("\x1b7")                                  # save cursor (in scroll region)
+        self._w(f"\x1b[{r};1H\x1b[2K" + top)
+        self._w(f"\x1b[{r+1};1H\x1b[2K" + mid)
+        self._w(f"\x1b[{r+2};1H\x1b[2K" + bot)
+        if working:
+            self._w("\x1b8")                              # back to scroll region for output
+        else:
+            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor after the typed text
+        sys.stdout.flush()
+
+    def read(self):
+        """Blocking single-line read at the pinned bar. Returns the submitted text.
+        Windows hold-Space push-to-talk preserved."""
+        self._sized()
+        self._w(f"\x1b[1;{self.scroll_bottom}r")          # re-assert region (handles resize)
+        buf = ""
+        self.draw_bar(buf)
+        old = None
+        if not IS_WINDOWS:
+            try:
+                import termios, tty
+                fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)
+            except Exception:
+                old = None
+        try:
+            while True:
+                if not buf and IS_WINDOWS and _VOICE and _key_down(VK_SPACE):
+                    time.sleep(0.12)
+                    while msvcrt and msvcrt.kbhit():
+                        msvcrt.getwch()
+                    if _key_down(VK_SPACE):
+                        text = _do_voice()
+                        if text.strip():
+                            return text
+                    continue
+                ch = _getch()
+                if ch is None:
+                    time.sleep(0.008); continue
+                if ch in ("\r", "\n"):
+                    return buf
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\x00", "\xe0"):
+                    if msvcrt:
+                        msvcrt.getwch()
+                    continue
+                if ch == "\x1b":
+                    try:
+                        import select
+                        while select.select([sys.stdin], [], [], 0.0)[0]:
+                            sys.stdin.read(1)
+                    except Exception:
+                        pass
+                    continue
+                if ch in ("\x08", "\x7f"):
+                    if buf:
+                        buf = buf[:-1]; self.draw_bar(buf)
+                    continue
+                if ch == " " and not buf and IS_WINDOWS and _VOICE:
+                    continue
+                if ch >= " ":
+                    buf += ch; self.draw_bar(buf)
+        finally:
+            if old is not None:
+                import termios
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+
+
 def main(argv):
-    global _C, _VOICE, _NET_MODE, _NO_SHELL, _NO_THINK, _FORCE_KALI
+    global _C, _VOICE, _NET_MODE, _NO_SHELL, _NO_THINK, _FORCE_KALI, _LIVE
     auto = False
     print_mode = False
     no_voice = False
     no_shell = False
     no_think = False
     force_kali = False
+    live = False
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
@@ -2318,6 +2446,8 @@ def main(argv):
             no_think = True
         elif a == "--kali-notes":
             force_kali = True
+        elif a == "--live":
+            live = True
         elif a in ("--sealed", "--offline", "--airgap"):
             net_mode = "sealed"
         elif a in ("--lab", "--offline-lab"):
@@ -2349,6 +2479,7 @@ def main(argv):
     _NO_SHELL = no_shell
     _NO_THINK = no_think
     _FORCE_KALI = force_kali
+    _LIVE = live
 
     if start_cwd:
         try:
@@ -2433,14 +2564,36 @@ def main(argv):
     messages = [{"role": "system", "content": build_system(model)}]
     pending = prompt
 
+    screen = None
+    if _LIVE and _C:
+        try:
+            import atexit
+            screen = LiveScreen(model)
+            atexit.register(lambda: sys.stdout.write("\x1b[r"))   # always release scroll region
+            screen.enter()
+        except Exception:
+            screen = None
+
     while True:
         try:
-            if pending:
+            if screen:
+                if pending:
+                    user = pending.strip(); pending = ""
+                else:
+                    user = screen.read().strip()
+                screen.model = model                 # keep the bar title in sync with /model
+                if user:
+                    screen.emit_user(user)            # submitted line into the scroll history
+                    screen.draw_bar(working=True)     # bar stays, shows "working", during the turn
+                screen.to_scroll()                    # output lands above the pinned bar
+            elif pending:
                 user = input_bar(model, prefill=pending).strip()
                 pending = ""
             else:
                 user = input_bar(model).strip()
         except (EOFError, KeyboardInterrupt):
+            if screen:
+                screen.exit()
             print("\n" + dim("  bye."))
             return 0
 
@@ -2451,6 +2604,8 @@ def main(argv):
             cmd, _, rest = user[1:].partition(" ")
             cmd = cmd.lower()
             if cmd in ("exit", "quit", "q"):
+                if screen:
+                    screen.exit()
                 print(dim("  bye.")); return 0
             if cmd == "help":
                 print(HELP); continue
