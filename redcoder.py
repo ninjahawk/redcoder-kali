@@ -377,6 +377,8 @@ _C = sys.stdout.isatty()
 _NET_MODE = NET_MODE_DEFAULT   # "sealed" | "lab" | "online"; set in main(), toggled by /net
 _NO_SHELL = False              # --no-shell: refuse run_shell entirely (safe automated testing
                                # on an open box — the model can still write commands as text)
+_NO_THINK = False              # --no-think: force thinking OFF for hybrid models (keeps the
+                               # fenced-JSON tool protocol clean; used for eval fairness)
 
 
 def c(text, code):
@@ -465,7 +467,7 @@ def ollama_chat(model, messages, on_token=None):
     # Disable thinking for hybrid models (e.g. leviathan/Qwen3.8) so the fenced-JSON tool
     # protocol isn't polluted by reasoning traces.
     _entry = MODEL_REGISTRY.get(model)
-    if _entry and _entry.get("think") is False:
+    if _NO_THINK or (_entry and _entry.get("think") is False):
         payload["think"] = False
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -2290,11 +2292,12 @@ def input_bar(model, prefill=None):
 
 
 def main(argv):
-    global _C, _VOICE, _NET_MODE, _NO_SHELL
+    global _C, _VOICE, _NET_MODE, _NO_SHELL, _NO_THINK
     auto = False
     print_mode = False
     no_voice = False
     no_shell = False
+    no_think = False
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
@@ -2308,6 +2311,8 @@ def main(argv):
             no_voice = True
         elif a == "--no-shell":
             no_shell = True
+        elif a == "--no-think":
+            no_think = True
         elif a in ("--sealed", "--offline", "--airgap"):
             net_mode = "sealed"
         elif a in ("--lab", "--offline-lab"):
@@ -2337,6 +2342,7 @@ def main(argv):
 
     _NET_MODE = net_mode
     _NO_SHELL = no_shell
+    _NO_THINK = no_think
 
     if start_cwd:
         try:

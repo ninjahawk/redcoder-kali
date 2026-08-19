@@ -52,7 +52,7 @@ def run_trial(task, model, timeout):
     # --no-shell: the agent can WRITE commands (tested) but never EXECUTE one — safe on an open
     # box. It still has the file tools. Force UTF-8 both ways so the ▸ tool markers survive.
     cmd = [sys.executable, os.path.join(REPO, "redcoder.py"),
-           "-p", task["prompt"], "-m", model, mode, "--no-shell", "-y"]
+           "-p", task["prompt"], "-m", model, mode, "--no-shell", "--no-think", "-y"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     t0 = time.time()
     try:

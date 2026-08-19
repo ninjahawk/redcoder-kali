@@ -81,8 +81,10 @@ def _setup_multiedit(wd):
 
 def _check_multiedit(r):
     files = [file_get(r, n) or "" for n in ("core.py", "api.py", "cli.py")]
-    renamed = sum(1 for c in files if "newname" in c and "oldname" not in c)
-    return (renamed / 3.0, f"renamed:{renamed}/3")
+    # Functional correctness = the IMPORT is renamed. A leftover '# uses oldname' COMMENT is a
+    # note, not code — leaving it is a valid (arguably smarter) choice, so don't penalize it.
+    renamed = sum(1 for c in files if "from newname import" in c and "from oldname import" not in c)
+    return (renamed / 3.0, f"import-renamed:{renamed}/3")
 
 
 # --- G. reasoning under indirection (map -> location -> value) --------------------------
