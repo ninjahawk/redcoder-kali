@@ -306,8 +306,7 @@ The user is `kali` and has sudo. Prefix commands with sudo only when they genuin
 root, and say why when you do.
 """
 
-if not IS_WINDOWS:
-    SYSTEM_PROMPT = SYSTEM_PROMPT.rstrip() + "\n" + KALI_NOTES
+_FORCE_KALI = False   # --kali-notes: include the Kali tool guidance even off-Linux (eval fidelity)
 
 
 def _identity_note(model):
@@ -348,7 +347,10 @@ def build_system(model=None):
         net = ("# Network access\n"
                "ONLINE mode: shell commands can reach the network. Still prefer local "
                "work — only go online when the task actually requires it.")
-    parts = [SYSTEM_PROMPT.rstrip(), net]
+    base = SYSTEM_PROMPT.rstrip()
+    if (not IS_WINDOWS) or _FORCE_KALI:      # Kali tool guidance on Linux, or when forced
+        base += "\n" + KALI_NOTES
+    parts = [base, net]
     if model is not None:
         parts.append(_identity_note(model))
     return "\n\n".join(parts)
@@ -2292,12 +2294,13 @@ def input_bar(model, prefill=None):
 
 
 def main(argv):
-    global _C, _VOICE, _NET_MODE, _NO_SHELL, _NO_THINK
+    global _C, _VOICE, _NET_MODE, _NO_SHELL, _NO_THINK, _FORCE_KALI
     auto = False
     print_mode = False
     no_voice = False
     no_shell = False
     no_think = False
+    force_kali = False
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
@@ -2313,6 +2316,8 @@ def main(argv):
             no_shell = True
         elif a == "--no-think":
             no_think = True
+        elif a == "--kali-notes":
+            force_kali = True
         elif a in ("--sealed", "--offline", "--airgap"):
             net_mode = "sealed"
         elif a in ("--lab", "--offline-lab"):
@@ -2343,6 +2348,7 @@ def main(argv):
     _NET_MODE = net_mode
     _NO_SHELL = no_shell
     _NO_THINK = no_think
+    _FORCE_KALI = force_kali
 
     if start_cwd:
         try:
