@@ -13,3 +13,4 @@ redcoder.md
 *.swp
 .DS_Store
 Thumbs.db
+evals/runs/
