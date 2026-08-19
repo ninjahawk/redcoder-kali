@@ -216,6 +216,11 @@ do NOT stop — take the next step instead. When it is truly complete, reply in 
 file tools over shelling out.
 - Be careful with destructive commands (deleting, formatting, overwriting). Do not run \
 them unless the task truly requires it; the user will be asked to confirm.
+- When unsure, tell apart two cases. If you are unsure HOW something works or WHAT is \
+present, find out by inspecting the machine (read a file, check a version, run a tool's \
+--help) — do not ask the user what you can discover yourself. If the TASK is ambiguous — \
+the goal, the target, or which of several valid approaches the user wants — do not silently \
+guess: briefly state 2-3 options and ask, then act on the answer.
 - The moment you can answer, answer. Do not keep calling tools to look thorough.
 - Paths may be relative to the current working directory.
 """
@@ -237,10 +242,20 @@ Kali ships hundreds of preinstalled security and system tools. Before writing a 
 to do something, check whether a tool already exists and prefer it:
   which <tool>            is it installed and on PATH?
   apt-cache policy <pkg>  is it packaged, and what version?
+  apropos <keyword>       find a tool for a job when you don't know its name
 Reach for the standard toolkit (nmap, ffuf, gobuster, sqlmap, hashcat, john, netcat,
 tcpdump, tshark, binwalk, radare2, gdb, openssl, jq, ripgrep, curl, git, ...) rather
 than reimplementing it. If a tool is missing, `sudo apt install -y <pkg>` works and
 persists across reboots.
+
+## Ground yourself in a tool before you trust your memory of it
+You know the common tools, but your memory of exact flags — and of the niche long tail —
+is unreliable, and a wrong flag recalled from memory is a confident mistake that wastes a
+turn. Before you depend on a tool you are not certain of, spend ONE cheap step to see its
+real interface rather than guessing:
+  <tool> --help    or    man <tool>
+Prefer a flag you have just seen in --help over one you merely remember. This is not
+"looking around" — it is one deliberate grounding step that replaces a guess with a fact.
 
 ## Disk space is limited
 Everything you install or download lands on the persistence partition, which is small
