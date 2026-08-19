@@ -91,6 +91,25 @@ this good there.
 **router role** (drago for 92%/9GB, or 8b for 83%/5GB) for pure tool-identification when you
 just want "what's the tool + command." This is the two-tier setup you described.
 
+## For us to do together (need your judgment / live validation)
+- **Persistent-bar TUI** — the always-live bottom bar with type-while-working. It's a full-screen
+  concurrent architecture (scroll region + threaded input) that I can't validate without a live
+  terminal, and it behaves differently across Windows/Kali terminals. Approach: build it behind
+  `--live`, validate each iteration live (you type, I fix — seconds per loop), flip to default
+  once it's clean. Current collapse-on-submit bar stays the default meanwhile. **Not shipped —
+  deliberately, to avoid breaking your primary interface blind.**
+- **KALI_NOTES canonical examples** — context-engineering research says a few canonical
+  intent→tool *examples* beat long lists. Could add 3-4 to `KALI_NOTES` to nudge routing further
+  (esp. for a small 8b router). Worth an A/B with `--kali-notes`, but you should pick the
+  examples (your real tool usage) and confirm on the stick — modifying the deployed Kali prompt.
+- **Two-tier model setup** — if you want the fast router in practice: add an `8b`/router entry to
+  the roster and a way to route "just identify the tool" prompts to it while leviathan handles
+  the rest. Design decision for you.
+- **Long-horizon/compaction test** — my eval tasks are short; I didn't stress the 8192-ctx
+  compaction path. A genuine gap to cover later (slow to run).
+- **Validate on Kali** — the input-editor uses termios there; unit-tested but not run live on the
+  stick. Airgapped/lab/online enforcement is unchanged and was WSL-validated earlier.
+
 ## Method (grounded in Anthropic)
 - tasks → trials → graders → transcripts; grade the OUTCOME (files + answer + tool-use), not the
   tool path; partial credit; pass@k / pass^k; isolated clean workspace per trial.
