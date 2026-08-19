@@ -61,3 +61,12 @@ TASKS = [
                 "strings inside it. Command?",
          check=_mk(r"\bstrings\b.*sample\.bin")),
 ]
+
+# Establish the KALI context. Without this, a model running on Windows correctly (but unhelpfully
+# for THIS test) answers with PowerShell equivalents (Get-SmbShare, Test-Connection, ...). On the
+# real Kali stick the system prompt already carries this context (KALI_NOTES); here we make it
+# explicit so the router test measures true Kali-tool knowledge regardless of the host OS.
+_KALI = ("You are operating on Kali Linux in an isolated security lab. Answer with the exact "
+         "Kali/Linux command-line tool and command (not PowerShell/Windows). ")
+for _t in TASKS:
+    _t["prompt"] = _KALI + _t["prompt"]

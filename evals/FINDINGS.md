@@ -18,6 +18,41 @@ off for normal launches — verified in code).
 - Baseline **saturated** → raised difficulty. `tasks_hard` (k=3) running now to find real edges;
   `tasks_router` + the size ladder next.
 
+## Hard set (10 stress tasks, k=3)
+- leviathan: **10/10 pass@k**, and **effectively 10/10 pass^k** after one more grader fix.
+- The lone reliability blip (`multifile_rename`, pass^k=False) was — again — my grader being
+  too strict, **not the model**. leviathan renamed the imports in all 3 files correctly; on one
+  trial it deliberately left the `# uses oldname` *comment*, explicitly reasoning "it's just a
+  note, not code. Let me know if you'd like that updated too." That's *sophisticated* behavior
+  (code vs comment), and my grader wrongly required every textual "oldname" gone. Fixed to check
+  functional correctness (the import).
+- **Meta-finding after two sets:** every leviathan "failure" so far has been a grader artifact,
+  never a model error. leviathan + the redcoder harness is very reliable on these task types
+  (grounding, multi-step, edits, retrieval, distractors, indirection, ask-vs-act, tool-select,
+  precise output, security-command writing). Its real limits are architectural (8192 ctx, ~9
+  tok/s), not capability. Lesson banked: grade FUNCTIONAL/outcome correctness, be lenient on
+  incidental text — the model is smart enough that strict graders mostly measure the grader.
+
+## Small-model tool-router ladder (how small can we go?)
+Kali tool-ID accuracy (12 tasks, --no-shell, --no-think), preliminary (verifying failures via
+transcripts):
+
+| model | accuracy | speed | note |
+|---|---|---|---|
+| qwen3-abliterated **1.7b** | 3/12 (25%) | ~2s | lacks tool knowledge |
+| qwen3-abliterated **4b**   | 5/12 (42%) | ~2s | weak |
+| qwen3-abliterated **8b**   | 4/12 (33%) | ~4s | weak (not > 4b) |
+| **drago 14b (coder)**      | **10/12 (83%)** | ~6s | **strong — the sweet spot** |
+| leviathan 27b              | (running)  | ~slow | ceiling |
+
+**Preliminary takeaway:** you can't go tiny for Kali tool-routing — general models ≤8B don't
+know the tools (~25-40%). There's a sharp jump at the **14B CODER (drago)**: 83%, and it's
+*fast* (fully on GPU, ~60 tok/s, 9GB) vs leviathan (~9 tok/s, 18GB). Notably drago (a *coder*)
+beats the 8B *general* model by a lot — for syntax-heavy tool-command generation, **coder
+training matters more than raw size**. So the lightweight "just identify the tool + method"
+router = **drago**, not something smaller. (Confirming the exact failures aren't grader
+strictness before finalizing — same discipline as before.)
+
 ## Method (grounded in Anthropic)
 - tasks → trials → graders → transcripts; grade the OUTCOME (files + answer + tool-use), not the
   tool path; partial credit; pass@k / pass^k; isolated clean workspace per trial.
