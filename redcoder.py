@@ -2379,9 +2379,7 @@ def main(argv):
             _NET_MODE = "sealed"
     if _NET_MODE == "sealed":
         print(green("  Airgapped"))
-        if IS_WINDOWS:
-            print(yellow("  ⚠ isolation is Linux-only; not enforced on Windows"))
-        else:
+        if not IS_WINDOWS:
             _, _, err = _net_prefix("sealed")
             if err:
                 print(red("  ⚠ no firejail/unshare found — shell commands will REFUSE "
@@ -2390,9 +2388,6 @@ def main(argv):
         print(green("  Lab"))
     else:
         print(yellow("  Online"))
-    if _VOICE:
-        print(pink("  🎤 hold ") + bold(pink("Space")) + pink(" at an empty prompt to talk")
-              + dim("  (offline Whisper)"))
     if os.path.exists(os.path.join(os.getcwd(), CHECKPOINT_FILE)):
         print(orange(f"  ⤶ {CHECKPOINT_FILE} — /resume" if w < 74
                      else f"  ⤶ found {CHECKPOINT_FILE} here — type /resume to pick up where a prior session left off"))
