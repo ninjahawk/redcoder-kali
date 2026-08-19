@@ -189,6 +189,36 @@ and recovery. And "safety" is purely a capability artifact here: no model refuse
 ones comply with destructive/ out-of-scope asks. → the two-tier picture holds (drago as the
 efficient all-rounder), and the sandbox is non-negotiable for anything above ~8B.
 
+## ★ Capability floor by size (baseline 15 + hard 10, × 1.7b·4b·8b·drago, k=1, 9.4 min)
+
+| set | 1.7b | 4b | 8b | drago |
+|---|---|---|---|---|
+| baseline (`tasks`) | 9/15 | 13/15 | 13/15 | 14/15 |
+| hard (`tasks_hard`) | 4/10 | 9/10 | 9/10 | 9/10 |
+
+**The inflection is 4B, and general capability SATURATES there.** 1.7b collapses on anything
+multi-step (hard **4/10** — fails deep-multistep, instruction-following, multi-file-edit, grounding).
+4b jumps to 13/15 · 9/10 and 8b/drago barely move past it — raw coding/file capability is roughly
+**flat from 4B→14B**. The residual weakness at every size is deep-multistep (1/2), echoing the
+erratic-trajectory finding: long-horizon coherence is the hard axis regardless of size.
+
+## ★★ THE SYNTHESIS (answers "how small can we go?")
+Across every campaign, **general capability saturates at ~4B, but the SECURITY-agent dimensions keep
+climbing well past it:** vague-inference 2/5→**5/5**, Kali tool-routing 4b 75%→8b 83%→**drago 92%**,
+credential-tool knowledge (hydra/hashcat) 0/2→**2/2**, scope discipline (**only 14b**), recovery
+3/7→**5/7**. So the answer is two-part:
+- **General coding/file assistant → 4B is enough** (saturated, fits a USB, fast). Even 1.7b creates
+  files fine; 4b handles multi-step + edits.
+- **Kali security agent (route tools from vague intent + exercise judgment) → 8B floor, drago (14B)
+  for reliability.** The gap above 4B is domain knowledge (hydra, smbclient), judgment (ask vs
+  fabricate, stay in scope), and graceful degradation (file-tool fallback, ask for output) — not
+  file mechanics.
+- **1.7B → below the usable bar:** trivial single-step only; confabulates (IP as a directory) and
+  collapses on multi-step (hard 4/10).
+
+This is the two-tier setup, quantified: a small fast model is fine for general/file work, but the
+security-routing role wants drago. Matches the published ~7B tool-use threshold.
+
 ## Log (session 2)
 - **17:00–17:20** — Fixed the `$env:` path bug + OS/cwd prompt + Kali-consistency (integrity guard
   caught the PowerShell leak). Built + self-tested 4 new task sets (53 tasks). Launched the
@@ -208,6 +238,15 @@ efficient all-rounder), and the sandbox is non-negotiable for anything above ~8B
   is too slow to run 53 tasks). Smoke-tested one task per set first (pipeline OK). Running now.
   Early robustness signal from the smoke: 4b failed the TERSE phrasing "notes.txt: hello" while
   passing the explicit form — the phrasing-robustness axis is live.
+- **18:09** — Untested campaign done (25.7 min). Read transcripts → found the `.log` harness bug
+  (false-negated nested creation; fixed `TEXT_EXT`, re-ran fo_nested → all 1.0) and the destructive-
+  compliance safety finding (8b/drago write `rm -rf` when asked). Recorded the untested-area results.
+- **18:12** — Capability-floor campaign (baseline+hard × ladder) done in 9.4 min → the saturation-
+  at-4B synthesis above. General capability flat 4B→14B; security/judgment keeps scaling.
+- **18:22** — Launched the **leviathan ceiling probe**: 10 curated HARD cases (rec_ambiguous,
+  rec_typo_path, cw_scope_public, cw_destructive_bait, cw_sshbrute, vague_ssh, fo_dir_readme,
+  ambig_*) to test whether the 27B's reasoning breaks the universal failures the ≤14B models all
+  hit. ~65 min. Then converge + executive summary.
 
 ---
 
