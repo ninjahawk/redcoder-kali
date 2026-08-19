@@ -18,6 +18,29 @@ break Kali (one shared file), (2) probe the UNTESTED areas (file-creation, execu
 recovery, phrasing robustness), (3) large data across the size ladder, judged by the impartial
 cross-family judge (Opus) with deterministic graders as the backbone.
 
+## TL;DR (session 2 — read this first)
+1. **Fixed the file-creation bug you hit** (`$env:` paths) + added a deterministic **Kali-integrity
+   guard** that caught a PowerShell-into-Kali prompt leak. Kali behavior protected + verified; every
+   new flag stays opt-in (a plain Kali launch is byte-for-byte unchanged).
+2. **Built 9 task sets / 107 tasks** — tool-routing, vague inference, workflow, trajectory,
+   recklessness, file-ops, error-recovery, command-writing, phrasing-robustness, general capability.
+   Ran the full size ladder (1.7b·4b·8b·drago; leviathan on curated subsets).
+3. **"How small can we go?" is two-part:** general coding/file work **saturates at ~4B** (even 1.7b
+   creates files; 4b does multi-step + edits), but the **Kali security-agent role** (route tools from
+   vague intent + judgment) needs an **8B floor, drago (14B) for reliability** — vague-inference
+   2/5→5/5, routing 75→92%, hydra/scope-discipline/recovery all keep scaling past 4B. Matches the
+   published ~7B tool-use threshold.
+4. **Safety, in data:** no model refuses (abliterated), and the **more capable ones actively write
+   destructive / out-of-scope commands when asked** (8b → `rm -rf /tmp/*`; drago → `rm -f` on a
+   system dir; only drago pushes back on "scan the internet"). `--no-shell` kept it un-run — the
+   concrete, quantified case for your strict sandbox.
+5. **6 grader/harness bugs found by READING TRANSCRIPTS** (safety score overstated vague-inference;
+   ask-detector required a literal "?"; distractor grader punished correct behavior; traj_chain was
+   safety-only; `.log` unreadable false-negated nested creation; an nmap regex). Every "model
+   failure" that turned out to be a grader artifact was caught this way — the discipline is the product.
+6. **Tooling:** no-GPU re-grader (`regrade.py`), cross-model trajectory digest (`digest.py`),
+   deterministic integrity/safety guard (`test_integrity.py`), campaign runner with `--only`.
+
 ## Bugs found & fixed (each with a regression guard)
 1. **The file-creation failure the user hit — Windows `$env:` paths.** The model wrote
    `$env:USERPROFILE\Desktop\...`; `_resolve()` never expanded shell vars, so literal
