@@ -48,8 +48,10 @@ def main():
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--tag", default="", help="label for this campaign's run dir")
+    ap.add_argument("--only", default="", help="comma list of task ids to include (across tasksets)")
     args = ap.parse_args()
 
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
     tasksets = [t.strip() for t in args.tasksets.split(",") if t.strip()]
     model_keys = [m.strip() for m in args.models.split(",") if m.strip()]
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -70,8 +72,9 @@ def main():
             tdir = os.path.join(campdir, R_model_slug(mkey), ts, "transcripts")
             os.makedirs(tdir, exist_ok=True)
             rows = []
-            print(f"\n--- {ts}  (kali={R.KALI_CTX})", flush=True)
-            for t in mods[ts].TASKS:
+            tasklist = [t for t in mods[ts].TASKS if not only or t["id"] in only]
+            print(f"\n--- {ts}  (kali={R.KALI_CTX}, {len(tasklist)} tasks)", flush=True)
+            for t in tasklist:
                 scores = []
                 for i in range(args.k):
                     try:
