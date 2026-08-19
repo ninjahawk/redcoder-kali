@@ -310,9 +310,25 @@ if not IS_WINDOWS:
     SYSTEM_PROMPT = SYSTEM_PROMPT.rstrip() + "\n" + KALI_NOTES
 
 
-def build_system():
-    """SYSTEM_PROMPT plus a line telling the model the current network mode, so it
-    does not waste steps attempting work the mode won't allow."""
+def _identity_note(model):
+    """A short, accurate self-description so the model can answer 'what are you?' truthfully
+    instead of vaguely calling itself 'Redcoder' with no model behind it."""
+    name = friendly_name(model)
+    base = resolve_model(model).split("/")[-1]     # e.g. Qwen3.8-abliterated:27b
+    return ("# Who you are\n"
+            f"Your local name is \"{name}\" — one of Redcoder's models, each named after a "
+            f"dragon. Redcoder is the harness you run inside: a fully offline, local coding and "
+            f"security-lab agent on the user's own machine — there is no cloud. Under the hood "
+            f"you are a Qwen-family model, served locally by Ollama as `{base}`. If the user "
+            f"asks what you are or which model you're running, answer plainly and correctly: "
+            f"you're \"{name}\" in the Redcoder harness, running {base} locally via Ollama. Do "
+            f"not claim to be a cloud service or some other model, and never refuse this question.")
+
+
+def build_system(model=None):
+    """SYSTEM_PROMPT plus the current network mode and (if a model is given) an identity note,
+    so the model knows its dragon name and what it actually is. Regenerated on model/mode
+    changes and on /clear."""
     if _NET_MODE == "sealed":
         net = ("# Network access\n"
                "Airgapped mode: shell commands have NO network at all — not even a LAN. "
@@ -332,7 +348,10 @@ def build_system():
         net = ("# Network access\n"
                "ONLINE mode: shell commands can reach the network. Still prefer local "
                "work — only go online when the task actually requires it.")
-    return SYSTEM_PROMPT.rstrip() + "\n\n" + net
+    parts = [SYSTEM_PROMPT.rstrip(), net]
+    if model is not None:
+        parts.append(_identity_note(model))
+    return "\n\n".join(parts)
 
 # --------------------------------------------------------------------------- #
 #  Terminal color
@@ -2241,7 +2260,7 @@ def main(argv):
         if not ok:
             print(status)
             return 1
-        messages = [{"role": "system", "content": build_system()},
+        messages = [{"role": "system", "content": build_system(model)},
                     {"role": "user", "content": prompt}]
         try:
             agent_turn(model, messages, Approver(auto))
@@ -2293,7 +2312,7 @@ def main(argv):
     print()
 
     approver = Approver(auto)
-    messages = [{"role": "system", "content": build_system()}]
+    messages = [{"role": "system", "content": build_system(model)}]
     pending = prompt
 
     while True:
@@ -2318,7 +2337,7 @@ def main(argv):
             if cmd == "help":
                 print(HELP); continue
             if cmd in ("reset", "clear"):
-                messages = [{"role": "system", "content": build_system()}]
+                messages = [{"role": "system", "content": build_system(model)}]
                 print(dim("  conversation cleared.")); continue
             if cmd == "save":
                 if len(messages) <= 1:
@@ -2394,6 +2413,8 @@ def main(argv):
                     choice = pick_model(model)      # interactive roster + installer
                 if choice:
                     model = choice
+                    # Refresh the system prompt so the new model knows its own identity.
+                    messages[0] = {"role": "system", "content": build_system(model)}
                     ok, status = preflight(model)
                     print("  " + (green(status) if ok else yellow(status)))
                 else:
