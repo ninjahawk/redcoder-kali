@@ -71,6 +71,8 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import threading
+import queue as _queue
 
 try:
     import msvcrt  # Windows console key input (for hold-Space-to-talk)
@@ -2296,15 +2298,47 @@ def input_bar(model, prefill=None):
     return _read_boxed(w, prefill=prefill or "")
 
 
+_LIVE_INTERRUPT = object()   # sentinel: Ctrl-C came in on the input thread
+
+
+class _LockedWriter:
+    """Serializes ALL writes to the real terminal on one lock so the input thread's bar
+    redraws and the main thread's agent output never interleave-corrupt. Installed as
+    sys.stdout during --live so ordinary print()s in the agent are coordinated too."""
+    def __init__(self, real, lock):
+        self._real = real
+        self._lock = lock
+
+    def write(self, s):
+        with self._lock:
+            self._real.write(s)
+        return len(s)
+
+    def flush(self):
+        with self._lock:
+            self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class LiveScreen:
     """--live: a bottom-pinned input bar with agent output scrolling ABOVE it, Claude-Code
-    style. Uses a DECSTBM scroll region so the bottom BAR_H rows never scroll. Stage 1:
-    single-line input, read blocks on your turn but the bar stays visible the whole time
-    (including while the agent works). Always reset the terminal via exit()."""
+    style. A background thread reads keys so you can TYPE WHILE THE AGENT WORKS; the pinned bar
+    shows what you're typing and Enter queues the line (run after the current turn finishes).
+    A DECSTBM scroll region keeps the bottom BAR_H rows fixed. Cursor sits in the bar when idle
+    and in the scroll region while the agent streams. Always reset the terminal via exit()."""
     BAR_H = 3
 
     def __init__(self, model):
         self.model = model
+        self._real = sys.stdout                     # write bar updates straight to the terminal
+        self.lock = threading.Lock()
+        self.buf = ""
+        self.q = _queue.Queue()
+        self.working = threading.Event()            # set while the agent runs -> cursor to scroll
+        self._stop = threading.Event()
+        self._reader = None
         self._sized()
 
     def _sized(self):
@@ -2313,29 +2347,47 @@ class LiveScreen:
         except Exception:
             self.cols, self.rows = 80, 24
         self.cols = max(24, self.cols); self.rows = max(8, self.rows)
-        self.scroll_bottom = self.rows - self.BAR_H     # last scrollable row (1-indexed)
+        self.scroll_bottom = self.rows - self.BAR_H
 
     def _w(self, s):
-        sys.stdout.write(s); sys.stdout.flush()
+        self._real.write(s); self._real.flush()
 
     def enter(self):
         self._sized()
-        self._w(f"\x1b[1;{self.scroll_bottom}r")         # confine scrolling to the top
-        self._w(f"\x1b[{self.scroll_bottom};1H")         # park cursor at the region bottom
-        self.draw_bar()
+        with self.lock:
+            self._w(f"\x1b[1;{self.scroll_bottom}r")     # scroll region = the top area
+            self._w(f"\x1b[{self.scroll_bottom};1H")     # output starts at the region bottom
+            self._draw_bar()
+        sys.stdout = _LockedWriter(self._real, self.lock)   # coordinate agent output too
+        self._reader = threading.Thread(target=self._input_loop, daemon=True)
+        self._reader.start()
 
     def exit(self):
-        self._w("\x1b[r")                                # release scroll region (whole screen)
-        self._w(f"\x1b[{self.rows};1H\n")
+        self._stop.set()
+        sys.stdout = self._real                      # restore the plain terminal writer
+        with self.lock:
+            self._w("\x1b[?25h\x1b[r")               # show cursor, release scroll region
+            self._w(f"\x1b[{self.rows};1H\n")
+
+    def set_working(self, on):
+        (self.working.set if on else self.working.clear)()
+        with self.lock:
+            self._draw_bar()
 
     def to_scroll(self):
-        self._w(f"\x1b[{self.scroll_bottom};1H")         # so prints land above the bar
+        with self.lock:
+            self._w(f"\x1b[{self.scroll_bottom};1H")     # so the next output lands above the bar
 
     def emit_user(self, text):
-        self.to_scroll()
-        self._w(green("› ") + text + "\r\n")             # submitted msg as a chat line
+        with self.lock:
+            self._w(f"\x1b[{self.scroll_bottom};1H")
+            self._w(green("› ") + text + "\r\n")         # submitted line into the scroll history
+            self._draw_bar()
 
-    def draw_bar(self, buf="", working=False):
+    def _draw_bar(self):
+        """ASSUMES self.lock is held. Draws the pinned 3-row bar showing self.buf. Idle: cursor
+        parks in the input line. Working: cursor is saved/restored so agent output keeps the
+        scroll cursor (bar still updates to show what you type)."""
         cols = self.cols
         tag = f"[{friendly_name(self.model)}]"
         if len(f"╭─ redcoder · {tag} ") + 1 <= cols:
@@ -2344,31 +2396,22 @@ class LiveScreen:
         else:
             top = grey("╭─ "); tlen = 3
         top += grey("─" * max(0, cols - tlen - 1) + "╮")
-        avail = cols - 6                                  # "│ › " (4) + " " + "│"
-        shown = buf[-avail:] if len(buf) > avail else buf
-        if working:
-            mid = grey("│ ") + dim("… working  (Ctrl-C to interject)")
-        else:
-            mid = grey("│ ") + green("› ") + shown
+        inner = max(1, cols - 6)                          # "│ " + "› " + inner + " │"
+        shown = self.buf[-inner:] if len(self.buf) > inner else self.buf
+        mid = grey("│ ") + green("› ") + shown + " " * (inner - len(shown)) + grey(" │")
         bot = grey("╰" + "─" * max(0, cols - 2) + "╯")
         r = self.scroll_bottom + 1
-        self._w("\x1b7")                                  # save cursor (in scroll region)
+        self._w("\x1b7")                                  # save cursor
         self._w(f"\x1b[{r};1H\x1b[2K" + top)
         self._w(f"\x1b[{r+1};1H\x1b[2K" + mid)
         self._w(f"\x1b[{r+2};1H\x1b[2K" + bot)
-        if working:
-            self._w("\x1b8")                              # back to scroll region for output
+        if self.working.is_set():
+            self._w("\x1b8")                              # restore cursor to the scroll region
         else:
-            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor after the typed text
-        sys.stdout.flush()
+            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor in the input line
+        self._real.flush()
 
-    def read(self):
-        """Blocking single-line read at the pinned bar. Returns the submitted text.
-        Windows hold-Space push-to-talk preserved."""
-        self._sized()
-        self._w(f"\x1b[1;{self.scroll_bottom}r")          # re-assert region (handles resize)
-        buf = ""
-        self.draw_bar(buf)
+    def _input_loop(self):
         old = None
         if not IS_WINDOWS:
             try:
@@ -2377,47 +2420,44 @@ class LiveScreen:
             except Exception:
                 old = None
         try:
-            while True:
-                if not buf and IS_WINDOWS and _VOICE and _key_down(VK_SPACE):
-                    time.sleep(0.12)
-                    while msvcrt and msvcrt.kbhit():
-                        msvcrt.getwch()
-                    if _key_down(VK_SPACE):
-                        text = _do_voice()
-                        if text.strip():
-                            return text
-                    continue
+            while not self._stop.is_set():
                 ch = _getch()
                 if ch is None:
-                    time.sleep(0.008); continue
+                    time.sleep(0.01); continue
                 if ch in ("\r", "\n"):
-                    return buf
-                if ch == "\x03":
-                    raise KeyboardInterrupt
-                if ch in ("\x00", "\xe0"):
+                    with self.lock:
+                        line = self.buf; self.buf = ""; self._draw_bar()
+                    self.q.put(line)
+                elif ch == "\x03":
+                    self.q.put(_LIVE_INTERRUPT)
+                elif ch in ("\x00", "\xe0"):
                     if msvcrt:
                         msvcrt.getwch()
-                    continue
-                if ch == "\x1b":
+                elif ch == "\x1b":
                     try:
                         import select
                         while select.select([sys.stdin], [], [], 0.0)[0]:
                             sys.stdin.read(1)
                     except Exception:
                         pass
-                    continue
-                if ch in ("\x08", "\x7f"):
-                    if buf:
-                        buf = buf[:-1]; self.draw_bar(buf)
-                    continue
-                if ch == " " and not buf and IS_WINDOWS and _VOICE:
-                    continue
-                if ch >= " ":
-                    buf += ch; self.draw_bar(buf)
+                elif ch in ("\x08", "\x7f"):
+                    with self.lock:
+                        if self.buf:
+                            self.buf = self.buf[:-1]; self._draw_bar()
+                elif ch >= " ":
+                    with self.lock:
+                        self.buf += ch; self._draw_bar()
         finally:
             if old is not None:
                 import termios
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+
+    def read(self):
+        """Block until a line is submitted (typed now, or queued while the agent worked)."""
+        line = self.q.get()
+        if line is _LIVE_INTERRUPT:
+            raise KeyboardInterrupt
+        return line
 
 
 def main(argv):
@@ -2571,7 +2611,7 @@ def main(argv):
         try:
             import atexit
             screen = LiveScreen(model)
-            atexit.register(lambda: sys.stdout.write("\x1b[r"))   # always release scroll region
+            atexit.register(lambda: os.write(1, b"\x1b[r"))       # always release scroll region (raw fd)
             screen.enter()
         except Exception:
             screen = None
@@ -2586,7 +2626,6 @@ def main(argv):
                 screen.model = model                 # keep the bar title in sync with /model
                 if user:
                     screen.emit_user(user)            # submitted line into the scroll history
-                    screen.draw_bar(working=True)     # bar stays, shows "working", during the turn
                 screen.to_scroll()                    # output lands above the pinned bar
             elif pending:
                 user = input_bar(model, prefill=pending).strip()
@@ -2705,12 +2744,17 @@ def main(argv):
             print(yellow(f"  unknown command: /{cmd}  (try /help)")); continue
 
         messages.append({"role": "user", "content": user})
+        if screen:
+            screen.set_working(True)                  # you can keep typing; Enter queues the line
         try:
             agent_turn(model, messages, approver)
         except RuntimeError as e:
             print(red(f"  ! {e}"))
         except KeyboardInterrupt:
             print(yellow("\n  (interrupted)"))
+        finally:
+            if screen:
+                screen.set_working(False)             # back to idle: cursor returns to the bar
         print()
 
 
