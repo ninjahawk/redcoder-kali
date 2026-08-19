@@ -2428,7 +2428,7 @@ def main(argv):
     no_shell = False
     no_think = False
     force_kali = False
-    live = False
+    live = True                 # persistent bottom bar ON by default; --classic-bar disables it
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
     start_cwd = None
@@ -2448,6 +2448,8 @@ def main(argv):
             force_kali = True
         elif a == "--live":
             live = True
+        elif a in ("--classic-bar", "--no-live"):
+            live = False
         elif a in ("--sealed", "--offline", "--airgap"):
             net_mode = "sealed"
         elif a in ("--lab", "--offline-lab"):

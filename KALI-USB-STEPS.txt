@@ -1,0 +1,230 @@
+===============================================================================
+ STEP-BY-STEP: KALI LINUX LIVE USB (with persistence)
+ Written 2026-08-17
+===============================================================================
+
+VERIFIED FACTS ABOUT THIS MACHINE (checked, not guessed)
+
+  - C: is NOT encrypted. manage-bde reports "BitLocker Version: None",
+    "Fully Decrypted", "Protection Off", "Key Protectors: None Found".
+    => Disabling Secure Boot is SAFE. No recovery key needed. Nothing to undo.
+
+  - Target USB: SanDisk Cruzer Glide, 28.7 GB, currently drive D:.
+    THIS IS THE DRIVE THAT GETS WIPED. Nothing else.
+
+  - Kali 2026.2 live image, torrent verified authentic against Kali's
+    published SHA256 before downloading.
+
+HOW KALI DIFFERS FROM TAILS - READ THIS ONCE
+
+  Same mechanism: read-only squashfs + RAM overlay, so it is amnesic.
+  NOT the same purpose. Kali does NOT route through Tor. No MAC spoofing.
+  No RAM wipe on shutdown. Your real IP is used for everything.
+  Kali is a security toolkit, not an anonymity system. Do not use it
+  the way you use Tails.
+
+
+===============================================================================
+ PART 1 - GET THE ISO
+===============================================================================
+
+STEP 1. qBittorrent is already downloading:
+          kali-linux-2026.2-live-amd64.iso   (~4-5 GB)
+        The torrent file itself was hash-verified before starting.
+
+STEP 2. When it finishes, verify the ISO. Paste into PowerShell:
+
+          Get-FileHash "$env:USERPROFILE\Downloads\kali-linux-2026.2-live-amd64.iso" -Algorithm SHA256
+
+        MUST equal:
+          49e90e694d1b3dedd47f94afbe99dfdd5afb41c8462b638bbd332929769c773a
+
+        If it does not match, STOP. Do not flash it.
+
+
+===============================================================================
+ PART 2 - FLASH IT WITH RUFUS
+===============================================================================
+
+Rufus is already here: C:\Users\jedin\Downloads\rufus-portable.exe
+
+STEP 3. Plug in ONLY the SanDisk. Unplug any other USB storage first so
+        there is no chance of picking the wrong one.
+
+STEP 4. Run rufus-portable.exe.
+
+STEP 5. Device:  confirm it says SanDisk Cruzer Glide, ~28.7 GB.
+        DOUBLE CHECK THIS. Rufus erases whatever is selected.
+
+STEP 6. Boot selection: SELECT -> pick the Kali ISO.
+
+STEP 7. RUFUS WILL SAY "DD IMAGE WRITING MODE WILL BE ENFORCED". Accept it.
+        This is fine and is actually the most faithful way to write the
+        image - it is what Kali's own docs and balenaEtcher do.
+
+        CONSEQUENCE: in DD mode Rufus CANNOT create the persistence
+        partition, so there is no persistence slider. Persistence gets
+        added by hand afterwards (Part 3B below). This is Kali's
+        officially documented method anyway.
+
+STEP 8. START. Confirm the wipe warning. Wait for it to finish.
+
+STEP 9. Afterwards Windows may pop "You need to format the disk."
+        CLICK CANCEL. That is Windows failing to read Linux filesystems,
+        not a failed burn. Your Tails stick does the same thing.
+
+
+===============================================================================
+ PART 3 - BOOT IT
+===============================================================================
+
+STEP 10. Shut down. Power on, press DEL repeatedly to enter BIOS.
+
+STEP 11. Find Secure Boot and DISABLE it. Save and exit.
+         (Safe on this machine - drive is not encrypted, confirmed above.)
+         Location is usually: Settings > Advanced > Windows OS Configuration
+         or under Boot. MSI moves it between BIOS versions.
+
+STEP 12. Power on, press F11 repeatedly = MSI one-time boot menu.
+         Pick the SanDisk.
+
+STEP 13. FIRST BOOT ONLY: pick the normal "Live system" entry. The
+         persistence entry will not work yet - the partition does not
+         exist until you do Part 3B. Confirm Kali boots, then continue.
+
+         ON EVERY BOOT AFTER PART 3B: PICK "Live system with USB persistence".
+         The DEFAULT entry is plain live with NO persistence. If you take
+         the default, nothing you do will be saved and you will think
+         persistence is broken when it is not.
+
+STEP 14. If you get a black screen instead of the boot menu, press "e" at
+         the boot loader and add to the kernel line:
+
+           nouveau.modeset=0
+
+         (Blackwell/RTX 5070 driver support. Kali 2026.2 is likely new
+         enough not to need this, but that is the fix if it hangs.)
+
+
+===============================================================================
+ PART 3B - CREATE THE PERSISTENCE PARTITION (from inside Kali)
+===============================================================================
+
+Do this AFTER Kali has booted successfully once.
+
+  *** THE ONLY DANGEROUS STEP IN THIS WHOLE DOCUMENT IS PICKING THE WRONG
+      DEVICE. ON THIS MACHINE THEY ARE EASY TO TELL APART: ***
+
+        /dev/sda        = the USB stick        <- THIS ONE
+        /dev/nvme0n1    = your Windows drive   <- NEVER TOUCH
+
+  If you ever see "nvme" in a command you are about to run, STOP.
+
+STEP A. Open a terminal in Kali and confirm what you are looking at:
+
+          lsblk
+
+        You should see sda with 28.7G and RM=1 (removable), containing
+        sda1 and sda2, plus free space.
+
+        The internal drive is nvme0n1 with RM=0. Its SIZE depends on
+        which machine you booted:
+          desktop = 931.5G      laptop = 238.5G
+        The RM column is the reliable tell: RM=1 is the USB, RM=0 is not.
+
+        If the names differ from this, STOP and check with Claude.
+
+STEP B. *** USE --wipe never. THIS IS NOT OPTIONAL. ***
+
+          sudo fdisk --wipe never /dev/sda
+
+        WHY: plain "sudo fdisk /dev/sda" warns
+
+          "The device contains 'iso9660' signature and it will be
+           removed by a write command."
+
+        That iso9660 signature IS the Kali live filesystem - the thing
+        live-boot mounts at /run/live/medium. Let fdisk strip it and the
+        stick stops booting and you reflash from scratch.
+
+        With --wipe never the warning changes to "...it MAY REMAIN on the
+        device", which is what you want. It then suggests wiping with
+        wipefs(8). IGNORE THAT. Following it destroys the install.
+
+STEP C. Type p first. Confirm it says 28.65 GiB and "Cruzer Glide".
+        If it says 238.5 GiB you are on the laptop's Windows drive - press
+        q immediately.
+
+STEP D. Create the partition:  n , p , 3 , Enter , Enter , w
+        Expect: "Created a new partition 3 of type 'Linux' and of
+        size 23.5 GiB."
+        If asked about an ntfs signature on PARTITION 3 -> Yes (stale).
+        If any prompt mentions iso9660 -> No.
+
+STEP E. If w says "Re-reading the partition table failed: Device or
+        resource busy", run:   sudo partprobe /dev/sda
+        (On the 2026-08-17 run it wrote cleanly; this was not needed.)
+
+STEP F. Format and configure:
+
+          sudo mkfs.ext4 -L persistence /dev/sda3
+          sudo mkdir -p /mnt/p && sudo mount /dev/sda3 /mnt/p
+          echo "/ union" | sudo tee /mnt/p/persistence.conf
+          sudo umount /mnt/p
+
+        If mkfs warns "/dev/sda3 contains a ntfs file system" -> y.
+
+        The label MUST be exactly "persistence" and the file MUST contain
+        exactly "/ union" or it silently will not work.
+
+        NOTE: this partition is UNENCRYPTED by your choice. Anyone who
+        plugs this stick into any computer can read whatever you save.
+
+STEP G. Verify before rebooting:   lsblk -f
+
+        WANT TO SEE:
+          sda1  iso9660  "Jolie Kali Live"   <- must still be there
+          sda3  ext4     persistence         <- with a UUID
+
+STEP H. Reboot and pick "Live system with USB persistence".
+
+
+===============================================================================
+ PART 4 - CONFIRM PERSISTENCE ACTUALLY WORKS
+===============================================================================
+
+STEP 15. In Kali, save a file to the Desktop. Call it test.txt.
+
+STEP 16. Reboot. Pick "Live system with USB persistence" again.
+
+STEP 17. Is test.txt still on the Desktop?
+           YES -> persistence works. Done.
+           NO  -> Rufus persistence failed. Tell Claude, use the fallback.
+
+
+===============================================================================
+ PART 5 - BACK TO WINDOWS
+===============================================================================
+
+STEP 18. Shut down Kali, unplug the USB, power on. Windows boots normally.
+         Kali never wrote to your internal drive.
+
+STEP 19. OPTIONAL: re-enable Secure Boot in BIOS (Del at POST). Not required
+         and nothing breaks either way, since your drive is not encrypted.
+
+STEP 20. If Windows does not come up, it is boot order, not damage. Del at
+         POST, put "Windows Boot Manager" first.
+
+
+===============================================================================
+ QUICK REFERENCE
+===============================================================================
+
+  Del at POST   = MSI BIOS setup (Secure Boot lives here)
+  F11 at POST   = MSI one-time boot menu (use this for the USB)
+
+  ISO SHA256    = 49e90e694d1b3dedd47f94afbe99dfdd5afb41c8462b638bbd332929769c773a
+  Target drive  = SanDisk Cruzer Glide 28.7 GB
+  Boot entry    = "Live system with USB persistence"  NOT the default
+
+===============================================================================

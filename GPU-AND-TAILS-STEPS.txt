@@ -1,0 +1,182 @@
+===============================================================================
+ STEP-BY-STEP: FIX GPU / MONITOR, THEN BOOT TAILS
+ Written 2026-08-17
+===============================================================================
+
+WHAT WAS FOUND (verified, not guessed)
+
+  - Your monitor cable is plugged into the MOTHERBOARD's HDMI port, not the
+    RTX 5070. Windows reports the monitor's parent device as
+    PCI\VEN_1002&DEV_13C0 = AMD Radeon integrated graphics (Ryzen 9600X iGPU).
+    If it were on the 5070 it would read VEN_10DE.
+
+  - RTX 5070 status at idle: 0% used, 0 MiB of 12227 MiB VRAM, 5.58 W, 180 MHz.
+    Zero VRAM in use = it is not even drawing your desktop. The card itself is
+    healthy and seated at PCIe x16. It is simply not connected to anything.
+
+  - Monitor is an MSI G32C4W (1080p, 165/170 Hz panel) currently running at
+    60 Hz. You are using less than half the refresh rate you paid for.
+
+
+===============================================================================
+ PART 1 - MOVE THE MONITOR TO THE GRAPHICS CARD
+===============================================================================
+
+STEP 1. Shut Windows down completely.
+        Start > Power > Shut down. Not sleep, not restart.
+
+STEP 2. Look at the back of the PC. You will see two groups of video ports:
+          - UP HIGH, in the block with USB / ethernet / audio jacks
+            = MOTHERBOARD ports. This is where your cable is now. WRONG.
+          - LOWER DOWN, on a card sticking out horizontally, usually with
+            2 or 3 ports close together = RTX 5070. RIGHT.
+
+STEP 3. Unplug the video cable from the motherboard port.
+
+STEP 4. Plug it into the RTX 5070.
+        USE DISPLAYPORT IF YOUR MONITOR HAS IT. DisplayPort is better than
+        HDMI for high refresh rate and for FreeSync / G-Sync. If your cable
+        is HDMI-only, use the card's HDMI port for now and buy a DisplayPort
+        cable later - they are about $10.
+
+STEP 5. Power on. The screen may stay black for 5-15 seconds longer than
+        usual on this first boot. That is normal, wait for it.
+
+STEP 6. Set the refresh rate. THIS DOES NOT HAPPEN AUTOMATICALLY.
+          Settings > System > Display > Advanced display
+          Find "Choose a refresh rate" and pick the HIGHEST number offered
+          (should be around 165 Hz, definitely not 60 Hz).
+
+STEP 7. Verify it worked. Open PowerShell and paste:
+
+          nvidia-smi
+
+        WHAT YOU WANT TO SEE: a few hundred MiB of memory in use, instead of
+        0 MiB. That proves the 5070 is now drawing your desktop.
+
+STEP 8. Verify games are using it. Launch a game, play for 30 seconds,
+        alt-tab out, and run nvidia-smi again.
+          - 60-99% utilization = correct, the 5070 is rendering.
+          - near 0% = still wrong, tell Claude and we will dig further.
+
+
+IF THE SCREEN STAYS BLACK AFTER MOVING THE CABLE
+  Do not panic and do not assume the card is dead.
+  1. Make sure the cable is fully seated at BOTH ends (click on DisplayPort).
+  2. Try the card's other port.
+  3. Worst case, move the cable back to the motherboard port to get a
+     picture again, boot, and report back.
+
+
+===============================================================================
+ PART 2 - AFTER THE CABLE MOVE, RETEST GTA V FRAME GENERATION
+===============================================================================
+
+You had previously traced the head-halo artifact in GTA V to DLSS Frame
+Generation, and left frame gen turned OFF (130 fps, no halo).
+
+Frame generation is known to misbehave when frames are rendered on one GPU
+and copied to a different GPU for display, which is exactly what was
+happening. So:
+
+STEP 1. With the monitor now on the 5070, turn Frame Generation back ON
+        in GTA V. Game must be closed when editing settings.xml.
+STEP 2. Look for the halo around heads again.
+STEP 3. If the halo is GONE, you are done - no NVIDIA app DLSS Override
+        needed, and you get your 300 fps back.
+STEP 4. If the halo is STILL there, then do the planned fix:
+          NVIDIA app > Graphics > GTA V > DLSS Override > Latest
+
+
+===============================================================================
+ PART 3 - BOOTING THE TAILS USB ON THIS PC
+===============================================================================
+
+Verified about this machine: UEFI firmware (AMI 1.A55), Secure Boot is ON,
+31 GB RAM, single NVMe drive with Windows on it.
+
+BEFORE YOU BOOT
+
+STEP 1. WI-FI: NOTHING TO DO. RESOLVED.
+        You are on Tails 7.1 = Debian 13, kernel 6.12, which includes the
+        mt7925e driver and firmware for your MediaTek MT7925 Wi-Fi 7 card.
+        Wi-Fi will work. NO ETHERNET CABLE NEEDED. Ignore any earlier
+        version of this note that said otherwise.
+        (For the record: the driver needs kernel 6.7+. Only old Tails 6.x,
+        on kernel 6.1, would have had no Wi-Fi on this machine.)
+
+STEP 1b. CHECK FOR A TAILS UPGRADE once you are online.
+        Tails 7.1 shipped in autumn 2025 and Tails releases every 4-6 weeks,
+        so there are almost certainly newer 7.x versions out. Those releases
+        are mostly Tor Browser security fixes, and a stale Tor Browser is a
+        bigger real risk than anything else in this document. Tails checks
+        automatically when it has a network connection and offers the
+        upgrade - accept it. Takes a while, leave it alone until done.
+
+STEP 2. DO NOT DISABLE SECURE BOOT.
+        Modern Tails boots fine with Secure Boot enabled. Turning it off can
+        change the TPM measurements and drop you at a BitLocker recovery key
+        prompt the next time you boot Windows.
+
+STEP 3. Only if you find you must disable Secure Boot anyway: FIRST get your
+        recovery key and write it down.
+          https://account.microsoft.com/devices/recoverykey
+        Check whether encryption is even on:
+          Settings > Privacy & security > Device encryption
+          (if that page does not exist, it is off and this does not apply)
+
+BOOTING
+
+STEP 4. Plug in the Tails USB stick.
+        IF WINDOWS POPS UP "You need to format the disk" - CLICK CANCEL.
+        NEVER CLICK FORMAT. That would destroy the stick.
+
+STEP 5. Shut down. Then power on and immediately press F11 repeatedly.
+        F11 = MSI one-time boot menu. Pick the USB stick.
+        (Del = full BIOS setup, only needed if F11 does not work.)
+        Use F11, not a permanent boot order change - nothing to undo later.
+
+STEP 6. If you get a black screen or a hang instead of the Tails boot menu:
+        at the Tails boot loader press "e" to edit, and add this to the
+        kernel line:
+
+          nouveau.modeset=0
+
+        This stops Linux from probing the RTX 5070, which has no working
+        open-source driver yet (nouveau does not support Blackwell until
+        kernel 6.13). Only needed once the cable is on the card.
+
+STEP 7. In the Tails Welcome Screen, leave MAC address spoofing ON (default).
+
+WHILE IN TAILS
+
+  - DO NOT click your Windows drive in the Files sidebar. Mounting the
+    internal drive is the only way to link your identity to the session and
+    the only way to damage the Windows install from Tails.
+
+  - Your public IP is the same as always. Using a different computer changes
+    nothing about what your ISP sees. If that matters, use bridges.
+
+GETTING BACK TO WINDOWS
+
+STEP 8. Shut down Tails, unplug the USB, power on. Windows boots normally.
+        Tails never writes to your internal drive, so there is nothing to
+        repair and nothing to undo.
+
+STEP 9. If Windows does not come up, it is boot order, not damage. Press Del
+        at startup and put "Windows Boot Manager" first in the boot priority
+        list.
+
+
+===============================================================================
+ QUICK REFERENCE
+===============================================================================
+
+  Del  at POST  = MSI BIOS setup
+  F11  at POST  = MSI one-time boot menu (use this for the USB)
+  nvidia-smi    = check if the 5070 is actually being used
+
+  RIGHT NOW:  monitor on motherboard, 60 Hz, 5070 idle at 0 MiB
+  GOAL:       monitor on the 5070, ~165 Hz, VRAM in use
+
+===============================================================================
