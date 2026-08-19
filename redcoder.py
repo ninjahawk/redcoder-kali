@@ -83,7 +83,37 @@ except ImportError:
 VERSION = "1.0"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TAGS_URL = "http://127.0.0.1:11434/api/tags"
-DEFAULT_MODEL = "redcoder-drago"   # the 14B, built by config/Modelfile.redcoder-drago; /model to switch
+DEFAULT_MODEL = "drago"   # a key in MODEL_REGISTRY below; /model switches or installs others
+
+# Dragon roster (see MODELS.md). Each friendly name maps to the actual abliterated Ollama
+# model redcoder runs. redcoder sends its own system prompt + sampling options every call, so
+# these run DIRECTLY off the base model — no `ollama create` step — which is what lets /model
+# install and switch them on the fly. `gb` = approx download size; `think: False` disables a
+# hybrid model's thinking so the JSON tool protocol stays clean.
+MODEL_REGISTRY = {
+    "drago": {
+        "ref": "huihui_ai/qwen2.5-coder-abliterate:14b", "gb": 9,
+        "desc": "14B coder — fast & light (~60 tok/s). Everyday baseline.",
+    },
+    "leviathan": {
+        "ref": "huihui_ai/Qwen3.8-abliterated:27b", "gb": 18, "think": False,
+        "desc": "27B dense — most capable, slow (~9 tok/s). Opus-style: smart but ponderous.",
+    },
+}
+
+
+def resolve_model(name):
+    """Friendly registry key -> real Ollama ref; raw names pass through unchanged."""
+    e = MODEL_REGISTRY.get(name)
+    return e["ref"] if e else name
+
+
+def friendly_name(name):
+    """Reverse: show the dragon name for a known ref/key, else the name itself."""
+    for k, e in MODEL_REGISTRY.items():
+        if k == name or e["ref"] == name:
+            return k
+    return name
 
 # Context window. THIS IS THE SETTING THAT DECIDES WHETHER YOU GET GPU SPEED.
 #
@@ -402,12 +432,21 @@ def ollama_chat(model, messages, on_token=None):
     If on_token is given it is called with each text chunk as it arrives.
     Also collects any native tool_calls the model may emit (fallback path).
     """
-    body = json.dumps({
-        "model": model,
+    # top_p/repeat_penalty match what config/Modelfile.redcoder-drago baked in, so running a
+    # base model ref directly behaves identically to the built model.
+    payload = {
+        "model": resolve_model(model),
         "messages": messages,
         "stream": True,
-        "options": {"temperature": 0.4, "num_ctx": NUM_CTX},
-    }).encode()
+        "options": {"temperature": 0.4, "top_p": 0.9, "repeat_penalty": 1.05,
+                    "num_ctx": NUM_CTX},
+    }
+    # Disable thinking for hybrid models (e.g. leviathan/Qwen3.8) so the fenced-JSON tool
+    # protocol isn't polluted by reasoning traces.
+    _entry = MODEL_REGISTRY.get(model)
+    if _entry and _entry.get("think") is False:
+        payload["think"] = False
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         OLLAMA_URL, data=body, headers={"Content-Type": "application/json"}
     )
@@ -437,10 +476,9 @@ def ollama_chat(model, messages, on_token=None):
         if e.code == 404:
             # Ollama IS up; it just doesn't have this model.
             raise RuntimeError(
-                f"Model '{model}' not found. Ollama is running but that model doesn't "
-                f"exist. Create it (e.g. `ollama cp <existing> {model}` or "
-                f"`ollama create {model} -f config/Modelfile.{model}`), or pick another "
-                f"with /model."
+                f"Model '{friendly_name(model)}' ({resolve_model(model)}) isn't installed. "
+                f"Use /model to install it (redcoder will offer to download it, and to free "
+                f"space if needed), or pick another."
             )
         raise RuntimeError(f"Ollama returned HTTP {e.code}: {e.reason}")
     except urllib.error.URLError as e:
@@ -1790,19 +1828,116 @@ Launch flags: run `redcoder --help` (includes --dangerously-skip-permissions, -p
 """
 
 
+def _model_installed(ref, names):
+    """True if `ref` (or its untagged base) appears in the installed `names`."""
+    base = ref.split(":")[0]
+    return any(n == ref or n.split(":")[0] == base for n in names)
+
+
 def preflight(model):
+    ref = resolve_model(model)
     try:
         with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
             names = [m.get("name", "") for m in json.load(r).get("models", [])]
-        if any(n.split(":")[0] == model or n == model for n in names):
-            return True, f"model '{model}' ready"
-        return False, (f"Ollama is up but model '{model}' is not installed. Build it with:\n"
-                       f"      ollama pull huihui_ai/qwen2.5-coder-abliterate:14b\n"
-                       f"      ollama create {model} -f config/Modelfile.redcoder-drago\n"
-                       f"    (or run ./install-kali.sh, which does both)")
+        if _model_installed(ref, names):
+            return True, f"model '{friendly_name(model)}' ready"
+        return False, (f"Ollama is up but '{friendly_name(model)}' ({ref}) is not installed.\n"
+                       f"    Type /model to install it (redcoder will offer to download it,\n"
+                       f"    and to free space if the disk is tight).")
     except Exception:
         return False, ("Ollama not reachable on 127.0.0.1:11434. Start it with `ollama serve`\n"
                        "    (or `systemctl start ollama`), then try again.")
+
+
+def _ollama_bin():
+    """Path to the ollama CLI (PATH on Kali; the per-user install dir on Windows)."""
+    found = shutil.which("ollama")
+    if found:
+        return found
+    if IS_WINDOWS:
+        cand = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
+        if os.path.exists(cand):
+            return cand
+    return "ollama"
+
+
+def _models_free_gb():
+    """Free space (GB) on the filesystem that holds Ollama's models, or None."""
+    path = os.environ.get("OLLAMA_MODELS") or os.path.join(os.path.expanduser("~"), ".ollama")
+    try:
+        while path and not os.path.exists(path):
+            path = os.path.dirname(path)
+        return shutil.disk_usage(path or ("/" if not IS_WINDOWS else "C:\\")).free / 1e9
+    except Exception:
+        return None
+
+
+def _free_space_menu(need_gb, free_gb):
+    """Offer to delete installed models to free room. Returns True if enough was freed."""
+    models = list_models()               # (name, gb), largest first
+    if not models:
+        print(red("  no models to delete.")); return False
+    print(bold("  Installed models (delete some to make room):"))
+    for i, (name, gb) in enumerate(models, 1):
+        print(f"    {cyan(str(i))}. {name}  {grey(f'({gb:.1f} GB)')}")
+    print(grey("  Enter number(s) to delete (e.g. '1 3'), or blank to cancel."))
+    try:
+        ans = input(bold("  delete which? ")).strip()
+    except EOFError:
+        return False
+    if not ans:
+        return False
+    freed = 0.0
+    for tok in ans.split():
+        if tok.isdigit() and 1 <= int(tok) <= len(models):
+            name, gb = models[int(tok) - 1]
+            try:
+                c = input(bold(f"  Really delete {name} ({gb:.1f} GB)? [y/N] ")).strip().lower()
+            except EOFError:
+                c = "n"
+            if c in ("y", "yes"):
+                if subprocess.run([_ollama_bin(), "rm", name]).returncode == 0:
+                    print(green(f"  deleted {name}")); freed += gb
+                else:
+                    print(red(f"  could not delete {name}"))
+    now = free_gb + freed
+    print(grey(f"  freed {freed:.1f} GB (now ~{now:.1f} GB free)."))
+    return now >= need_gb
+
+
+def ensure_installed(model):
+    """Ensure the model's ref is present; offer to pull it (and free space) if not.
+    Returns True when ready to use, False if declined or failed."""
+    ref = resolve_model(model)
+    try:
+        with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
+            names = [m.get("name", "") for m in json.load(r).get("models", [])]
+    except Exception:
+        print(red("  can't reach Ollama to check/install models.")); return False
+    if _model_installed(ref, names):
+        return True
+    entry = MODEL_REGISTRY.get(model, {})
+    need = entry.get("gb")
+    label = friendly_name(model)
+    print(yellow(f"  '{label}' ({ref}) isn't installed"
+                 + (f" — about {need} GB to download." if need else ".")))
+    free = _models_free_gb()
+    if free is not None:
+        print(grey(f"  free space: {free:.1f} GB"))
+        if need and free < need + 3:           # keep ~3 GB headroom
+            print(red(f"  not enough room for {label} (need ~{need} GB + headroom)."))
+            if not _free_space_menu(need + 3, free):
+                print(dim("  install cancelled — not enough space.")); return False
+    try:
+        go = input(bold(f"  Download and install {label} now? [Y/n] ")).strip().lower()
+    except EOFError:
+        return False
+    if go not in ("", "y", "yes"):
+        print(dim("  skipped.")); return False
+    print(dim(f"  pulling {ref} … (Ctrl-C to abort)"))
+    if subprocess.run([_ollama_bin(), "pull", ref]).returncode != 0:
+        print(red("  pull failed.")); return False
+    print(green(f"  installed {label}.")); return True
 
 
 def list_models():
@@ -1818,28 +1953,56 @@ def list_models():
 
 
 def pick_model(current):
-    """Interactive model picker (like Claude Code's /model). Returns a name or None."""
-    models = list_models()
-    if not models:
-        print(yellow("  no models found (is Ollama running?)"))
-        return None
-    print(bold("  Available models:"))
-    for i, (name, gb) in enumerate(models, 1):
-        mark = green(" ← current") if (name == current or name.split(":")[0] == current) else ""
-        print(f"    {cyan(str(i))}. {name}  {grey(f'({gb:.1f} GB)')}{mark}")
+    """Interactive model manager (like Claude Code's /model): shows the dragon roster with
+    install status, installs on demand (freeing space if needed), and switches. Returns the
+    chosen model name (ready to use) or None if cancelled."""
     try:
-        ans = input(bold("  switch to # (or name, Enter to cancel): ")).strip()
+        with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
+            installed = [m.get("name", "") for m in json.load(r).get("models", [])]
+    except Exception:
+        print(yellow("  can't reach Ollama (is it running?)")); return None
+
+    keys = list(MODEL_REGISTRY.keys())
+    print(bold("  Dragon roster:"))
+    for i, k in enumerate(keys, 1):
+        e = MODEL_REGISTRY[k]
+        got = _model_installed(e["ref"], installed)
+        status = green("installed") if got else yellow(f"{e['gb']} GB download")
+        cur = green(" ← current") if friendly_name(current) == k else ""
+        print(f"    {cyan(str(i))}. {bold(k)}  {grey(e['desc'])}  [{status}]{cur}")
+    # Any other installed models not in the roster (e.g. legacy redcoder-drago).
+    roster_refs = {e["ref"] for e in MODEL_REGISTRY.values()}
+    others = [(n, gb) for n, gb in list_models()
+              if not any(n == rr or n.split(":")[0] == rr.split(":")[0] for rr in roster_refs)]
+    base = len(keys)
+    if others:
+        print(grey("  other installed models:"))
+        for j, (n, gb) in enumerate(others, base + 1):
+            cur = green(" ← current") if current == n else ""
+            print(f"    {cyan(str(j))}. {n}  {grey(f'({gb:.1f} GB)')}{cur}")
+    try:
+        ans = input(bold("  switch to # or name (Enter to cancel): ")).strip()
     except (EOFError, KeyboardInterrupt):
         return None
     if not ans:
         return None
-    if ans.isdigit() and 1 <= int(ans) <= len(models):
-        return models[int(ans) - 1][0]
-    # allow typing a name / prefix directly
-    for name, _ in models:
-        if name == ans or name.split(":")[0] == ans:
-            return name
-    return ans  # accept as-is (preflight will validate)
+
+    chosen = None
+    if ans.isdigit():
+        idx = int(ans)
+        if 1 <= idx <= len(keys):
+            chosen = keys[idx - 1]
+        elif base < idx <= base + len(others):
+            chosen = others[idx - 1 - base][0]
+    elif ans in MODEL_REGISTRY:
+        chosen = ans
+    else:
+        chosen = ans                    # raw name / prefix — accept as typed
+    if not chosen:
+        print(yellow("  invalid choice.")); return None
+    if not ensure_installed(chosen):    # pulls / frees space if needed
+        return None
+    return chosen
 
 
 # --------------------------------------------------------------------------- #
@@ -2223,13 +2386,18 @@ def main(argv):
                     print(yellow("  usage: /net [status|sealed|lab|online]"))
                 continue
             if cmd in ("model", "models"):
-                choice = rest.strip() or pick_model(model)
+                arg = rest.strip()
+                if arg:
+                    # /model <name>: install-if-missing (freeing space if needed), then switch.
+                    choice = arg if ensure_installed(arg) else None
+                else:
+                    choice = pick_model(model)      # interactive roster + installer
                 if choice:
                     model = choice
                     ok, status = preflight(model)
                     print("  " + (green(status) if ok else yellow(status)))
                 else:
-                    print(grey(f"  keeping current model: {model}"))
+                    print(grey(f"  keeping current model: {friendly_name(model)}"))
                 continue
             if cmd == "cwd":
                 if rest.strip():
