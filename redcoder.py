@@ -2159,15 +2159,26 @@ def _term_width(default=80):
         return default
 
 
+def _real_cols(default=80):
+    """Full terminal width, UNCAPPED. The input bar spans the whole window (like Claude
+    Code) so text wraps at the same column as the border instead of spilling past it. (The
+    100-col cap in _term_width is for readable output, not the input frame.)"""
+    try:
+        return max(24, os.get_terminal_size().columns)
+    except Exception:
+        return default
+
+
 def input_bar(model, prefill=None):
-    """Draw a Claude-Code-style framed input bar that adapts to the terminal width
-    (drops the model tag, then shortens, as the window gets narrower)."""
+    """Claude-Code-style input frame: a titled top border, the prompt line, and a closing
+    bottom border, spanning the FULL terminal width so long input wraps inside the frame
+    rather than overflowing its right edge. Narrows the title as the window shrinks."""
     if not _C:
         if prefill is not None:
             return prefill
         return input("redcoder> ")
-    w = _term_width() - 1   # leave the last column empty so the ╮ never wraps a line
-    tag = f"[{model}]"
+    w = _real_cols() - 1        # one short of the edge so the border never auto-wraps a line
+    tag = f"[{friendly_name(model)}]"
     if len(f"╭─ redcoder · {tag} ") + 1 <= w:
         header = grey("╭─ ") + bold(red("redcoder")) + grey(" · ") + blue(tag) + " "
         hlen = len(f"╭─ redcoder · {tag} ")
@@ -2177,14 +2188,19 @@ def input_bar(model, prefill=None):
     else:
         header = grey("╭ ")
         hlen = 2
+    bottom = grey("╰" + "─" * max(0, w - 2) + "╯")
     print(header + grey("─" * max(0, w - hlen - 1) + "╮"))
     if prefill is not None:
         print(grey("│ ") + green("› ") + prefill)
+        print(bottom)
         return prefill
     if _VOICE:
         sys.stdout.write(grey("│ ") + green("› ")); sys.stdout.flush()
-        return read_input()
-    return input(grey("│ ") + green("› "))
+        text = read_input()
+    else:
+        text = input(grey("│ ") + green("› "))
+    print(bottom)
+    return text
 
 
 def main(argv):
