@@ -370,9 +370,17 @@ def build_system(model=None):
                "ONLINE mode: shell commands can reach the network. Still prefer local "
                "work — only go online when the task actually requires it.")
     base = SYSTEM_PROMPT.rstrip()
-    if (not IS_WINDOWS) or _FORCE_KALI:      # Kali tool guidance on Linux, or when forced
+    kali_ctx = (not IS_WINDOWS) or _FORCE_KALI
+    if kali_ctx:                             # Kali tool guidance on Linux, or when forced
         base += "\n" + KALI_NOTES
-    parts = [base, net]
+    env_note = ("# Environment\n"
+                f"Working directory: {os.getcwd()}\n"
+                f"Host OS: {'Linux (Kali)' if kali_ctx else 'Windows'}; "
+                f"default shell: {'bash' if kali_ctx else 'PowerShell'}. "
+                "File-tool paths are used literally (no shell expands them): pass a plain "
+                "relative path (e.g. notes.txt) or a full absolute path — never embed a shell "
+                "variable like $HOME, $env:USERPROFILE, or %USERPROFILE% in a tool path.")
+    parts = [base, net, env_note]
     if model is not None:
         parts.append(_identity_note(model))
     return "\n\n".join(parts)
@@ -702,8 +710,25 @@ class ToolError(Exception):
     pass
 
 
+_PS_ENV = re.compile(r"\$\{?env:([A-Za-z_][A-Za-z0-9_]*)\}?", re.IGNORECASE)
+
+
+def _expand_path(path):
+    """Resolve ~ and shell-style variables in a tool path. Models routinely emit a path with a
+    shell variable in it — PowerShell `$env:USERPROFILE`, Windows `%USERPROFILE%`, or POSIX
+    `$HOME`/`${HOME}` — but tool arguments are NOT run through a shell, so without this the
+    literal `$env:USERPROFILE` becomes a bogus directory (WinError 267 on Windows). Expand them
+    the way the matching shell would; leave anything unknown untouched."""
+    path = path or "."
+    # PowerShell $env:NAME / ${env:NAME} -> the variable's value (expandvars doesn't know this form)
+    path = _PS_ENV.sub(lambda m: os.environ.get(m.group(1), m.group(0)), path)
+    path = os.path.expandvars(path)          # %NAME% (Windows) and $NAME / ${NAME}
+    path = os.path.expanduser(path)          # ~ and ~user
+    return path
+
+
 def _resolve(path):
-    return os.path.abspath(os.path.expanduser(path or "."))
+    return os.path.abspath(_expand_path(path))
 
 
 def t_read_file(args):
@@ -1264,7 +1289,10 @@ class Spinner:
         self._thread = None
 
     def start(self):
-        if _C:
+        # In --live the pinned bar owns the screen; a background thread writing the spinner
+        # races the main thread's bar redraws and corrupts the cursor (garble + text leaking
+        # BELOW the bar). Live streaming already shows motion, so skip the thread entirely.
+        if _C and not _LIVE:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
         return self
@@ -1297,7 +1325,7 @@ class Spinner:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=0.3)
-        if _C:
+        if _C and self._thread:          # only clear the line if a spinner thread actually ran
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
 
@@ -2343,8 +2371,9 @@ class _LockedWriter:
 
 
 def _hl_user(text):
-    """Claude-Code-style shaded highlight for a submitted user message."""
-    return "\x1b[48;5;236m\x1b[38;5;252m › " + text + " \x1b[0m"
+    """Claude-Code-style shaded highlight for a submitted user message. A medium grey block
+    (48;5;238) reads clearly on a near-black terminal; 236 was effectively invisible."""
+    return "\x1b[48;5;238m\x1b[38;5;255m › " + text + " \x1b[0m"
 
 
 class LiveScreen:
