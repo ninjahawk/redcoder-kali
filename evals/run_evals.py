@@ -15,13 +15,13 @@ Usage:
     python run_evals.py --model leviathan -k 1
     python run_evals.py --model drago -k 3 --only grounding,multistep
 """
-import argparse, json, os, re, subprocess, sys, tempfile, time
+import argparse, json, os, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from judge import strip_ansi                          # noqa: E402
-import tasks as tasks_mod                             # noqa: E402
+import importlib                                       # noqa: E402
 
 TEXT_EXT = {".txt", ".py", ".json", ".md", ".csv", ".cfg", ".ini", ".sh", ""}
 
@@ -89,13 +89,15 @@ def main():
     ap.add_argument("-k", type=int, default=1, help="trials per task")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--only", default="", help="comma-separated task ids to run")
+    ap.add_argument("--taskset", default="tasks", help="task module: tasks | tasks_hard | tasks_router")
     ap.add_argument("--outdir", default=os.path.join(HERE, "runs"))
     args = ap.parse_args()
 
+    tasks_mod = importlib.import_module(args.taskset)
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     tasklist = [t for t in tasks_mod.TASKS if not only or t["id"] in only]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    outdir = os.path.join(args.outdir, f"{args.model}-{stamp}")
+    outdir = os.path.join(args.outdir, f"{args.model}-{args.taskset}-{stamp}")
     tdir = os.path.join(outdir, "transcripts")
     os.makedirs(tdir, exist_ok=True)
 
