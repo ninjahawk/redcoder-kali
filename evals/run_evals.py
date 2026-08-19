@@ -23,7 +23,12 @@ sys.path.insert(0, HERE)
 from judge import strip_ansi                          # noqa: E402
 import importlib                                       # noqa: E402
 
-TEXT_EXT = {".txt", ".py", ".json", ".md", ".csv", ".cfg", ".ini", ".sh", ""}
+# Extensions read back for file-based graders. MUST be generous — a security agent writes .log/
+# .conf/.env/.pcap-adjacent files, and a missing extension here silently FAILS a correct model
+# (e.g. .log was absent, so `create logs/2026/app.log` scored 0 despite the file existing).
+TEXT_EXT = {".txt", ".py", ".json", ".md", ".csv", ".cfg", ".ini", ".sh", ".log", ".conf",
+            ".env", ".yaml", ".yml", ".xml", ".html", ".htm", ".js", ".ts", ".c", ".cpp", ".h",
+            ".go", ".rs", ".java", ".rb", ".pl", ".ps1", ".bat", ".toml", ".list", ".out", ".text", ""}
 KALI_CTX = False                                      # --kali: force the real KALI_NOTES prompt
 
 
