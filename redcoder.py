@@ -117,6 +117,26 @@ def friendly_name(name):
             return k
     return name
 
+
+# Remember the last model used (per machine), so a new session opens on it — like Claude Code.
+_LAST_MODEL_FILE = os.path.join(os.path.expanduser("~"), ".redcoder_last_model")
+
+
+def save_last_model(name):
+    try:
+        with open(_LAST_MODEL_FILE, "w", encoding="utf-8") as f:
+            f.write(friendly_name(name))
+    except Exception:
+        pass
+
+
+def load_last_model():
+    try:
+        with open(_LAST_MODEL_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
 # Context window. THIS IS THE SETTING THAT DECIDES WHETHER YOU GET GPU SPEED.
 #
 # redcoder sends num_ctx in the API options, which OVERRIDES whatever the Modelfile
@@ -2381,7 +2401,7 @@ class LiveScreen:
     def emit_user(self, text):
         with self.lock:
             self._w(f"\x1b[{self.scroll_bottom};1H")
-            self._w(green("› ") + text + "\r\n")         # submitted line into the scroll history
+            self._w(green("› ") + text + "\r\n\r\n")      # submitted line + blank, before the reply
             self._draw_bar()
 
     def _draw_bar(self):
@@ -2471,6 +2491,7 @@ def main(argv):
     live = True                 # persistent bottom bar ON by default; --classic-bar disables it
     net_mode = NET_MODE_DEFAULT
     model = DEFAULT_MODEL
+    model_explicit = False
     start_cwd = None
     start_parts = []
     i = 0
@@ -2499,7 +2520,7 @@ def main(argv):
         elif a in ("-p", "--print"):
             print_mode = True
         elif a in ("-m", "--model") and i + 1 < len(argv):
-            model = argv[i + 1]; i += 1
+            model = argv[i + 1]; model_explicit = True; i += 1
         elif a in ("-C", "--cwd") and i + 1 < len(argv):
             start_cwd = argv[i + 1]; i += 1
         elif a == "--no-color":
@@ -2522,6 +2543,12 @@ def main(argv):
     _NO_THINK = no_think
     _FORCE_KALI = force_kali
     _LIVE = live
+
+    # Open on the last model used (like Claude Code) unless -m was given explicitly.
+    if not model_explicit:
+        model = load_last_model() or DEFAULT_MODEL
+    if not print_mode:                       # only interactive sessions set "last used" (not -p/evals)
+        save_last_model(model)
 
     if start_cwd:
         try:
@@ -2727,6 +2754,9 @@ def main(argv):
                     choice = pick_model(model)      # interactive roster + installer
                 if choice:
                     model = choice
+                    save_last_model(model)             # remember for the next session
+                    if screen:
+                        screen.model = model            # update the bar title immediately
                     # Refresh the system prompt so the new model knows its own identity.
                     messages[0] = {"role": "system", "content": build_system(model)}
                     ok, status = preflight(model)
@@ -2756,6 +2786,8 @@ def main(argv):
             if screen:
                 screen.set_working(False)             # back to idle: cursor returns to the bar
         print()
+        if screen:
+            print()                                  # blank line: cleanly separate reply from next message
 
 
 if __name__ == "__main__":
