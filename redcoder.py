@@ -2177,8 +2177,17 @@ def _read_boxed(W, prefill=""):
         sys.stdout.write("".join(out)); sys.stdout.flush()
         rows[0] = len(disp)
 
-    def finish():
-        sys.stdout.write("\x1b[1B\r\n"); sys.stdout.flush()    # drop below the closed box
+    def collapse(text):
+        # On submit, erase the whole active frame (top border included) and reprint the text
+        # as a plain chat line — so only the CURRENT input is boxed, like Claude Code.
+        disp = _wrap_words(text, tw)
+        out = []
+        if rows[0] > 0:
+            out.append(f"\x1b[{rows[0]}A")     # up from end-of-text to the top-border line
+        out.append("\r\x1b[J")                 # wipe the frame (top border downward)
+        for i, ln in enumerate(disp):
+            out.append((green("› ") if i == 0 else "  ") + ln + "\r\n")
+        sys.stdout.write("".join(out)); sys.stdout.flush()
 
     old = None
     if not IS_WINDOWS:
@@ -2197,13 +2206,13 @@ def _read_boxed(W, prefill=""):
                 if _key_down(VK_SPACE):
                     text = _do_voice()
                     if text.strip():
-                        finish(); print(green("  ▸ heard: ") + text); return text
+                        collapse(text); return text
                 continue
             ch = _getch()
             if ch is None:
                 time.sleep(0.008); continue
             if ch in ("\r", "\n"):
-                finish(); return buf
+                collapse(buf); return buf
             if ch == "\x03":
                 raise KeyboardInterrupt
             if ch in ("\x00", "\xe0"):                 # Windows special key → drop 2nd byte
