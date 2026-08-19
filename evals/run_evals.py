@@ -103,7 +103,8 @@ def main():
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     tasklist = [t for t in tasks_mod.TASKS if not only or t["id"] in only]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    outdir = os.path.join(args.outdir, f"{args.model}-{args.taskset}-{stamp}")
+    model_slug = re.sub(r"[^\w.-]", "_", args.model)     # refs like huihui_ai/x:4b -> valid dirname
+    outdir = os.path.join(args.outdir, f"{model_slug}-{args.taskset}-{stamp}")
     tdir = os.path.join(outdir, "transcripts")
     os.makedirs(tdir, exist_ok=True)
 
