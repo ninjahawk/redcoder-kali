@@ -2342,23 +2342,22 @@ class _LockedWriter:
         return getattr(self._real, name)
 
 
+def _hl_user(text):
+    """Claude-Code-style shaded highlight for a submitted user message."""
+    return "\x1b[48;5;236m\x1b[38;5;252m › " + text + " \x1b[0m"
+
+
 class LiveScreen:
-    """--live: a bottom-pinned input bar with agent output scrolling ABOVE it, Claude-Code
-    style. A background thread reads keys so you can TYPE WHILE THE AGENT WORKS; the pinned bar
-    shows what you're typing and Enter queues the line (run after the current turn finishes).
-    A DECSTBM scroll region keeps the bottom BAR_H rows fixed. Cursor sits in the bar when idle
-    and in the scroll region while the agent streams. Always reset the terminal via exit()."""
+    """--live: a bottom-pinned input bar with agent output scrolling ABOVE it (Claude-Code
+    style), via a DECSTBM scroll region. SINGLE-THREADED: input is read on your turn (the bar
+    stays pinned the whole time), so tool approvals and Ctrl-C interject work normally (a
+    background reader would fight them for stdin). Submitted messages render as a shaded
+    highlight. Always reset the terminal via exit()."""
     BAR_H = 3
 
     def __init__(self, model):
         self.model = model
-        self._real = sys.stdout                     # write bar updates straight to the terminal
-        self.lock = threading.Lock()
         self.buf = ""
-        self.q = _queue.Queue()
-        self.working = threading.Event()            # set while the agent runs -> cursor to scroll
-        self._stop = threading.Event()
-        self._reader = None
         self._sized()
 
     def _sized(self):
@@ -2370,44 +2369,32 @@ class LiveScreen:
         self.scroll_bottom = self.rows - self.BAR_H
 
     def _w(self, s):
-        self._real.write(s); self._real.flush()
+        sys.stdout.write(s); sys.stdout.flush()
 
     def enter(self):
         self._sized()
-        with self.lock:
-            self._w(f"\x1b[1;{self.scroll_bottom}r")     # scroll region = the top area
-            self._w(f"\x1b[{self.scroll_bottom};1H")     # output starts at the region bottom
-            self._draw_bar()
-        sys.stdout = _LockedWriter(self._real, self.lock)   # coordinate agent output too
-        self._reader = threading.Thread(target=self._input_loop, daemon=True)
-        self._reader.start()
+        self._w(f"\x1b[1;{self.scroll_bottom}r")         # scroll region = the top area
+        self._w(f"\x1b[{self.scroll_bottom};1H")         # output starts at the region bottom
+        self._draw_bar(place_cursor=False)
 
     def exit(self):
-        self._stop.set()
-        sys.stdout = self._real                      # restore the plain terminal writer
-        with self.lock:
-            self._w("\x1b[?25h\x1b[r")               # show cursor, release scroll region
-            self._w(f"\x1b[{self.rows};1H\n")
-
-    def set_working(self, on):
-        (self.working.set if on else self.working.clear)()
-        with self.lock:
-            self._draw_bar()
+        self._w("\x1b[?25h\x1b[r")                       # show cursor, release scroll region
+        self._w(f"\x1b[{self.rows};1H\n")
 
     def to_scroll(self):
-        with self.lock:
-            self._w(f"\x1b[{self.scroll_bottom};1H")     # so the next output lands above the bar
+        self._w(f"\x1b[{self.scroll_bottom};1H")         # next output lands above the bar
 
     def emit_user(self, text):
-        with self.lock:
-            self._w(f"\x1b[{self.scroll_bottom};1H")
-            self._w(green("› ") + text + "\r\n\r\n")      # submitted line + blank, before the reply
-            self._draw_bar()
+        self._w(f"\x1b[{self.scroll_bottom};1H")
+        self._w(_hl_user(text) + "\r\n\r\n")             # shaded message + blank; cursor stays in scroll
+        self.buf = ""
 
-    def _draw_bar(self):
-        """ASSUMES self.lock is held. Draws the pinned 3-row bar showing self.buf. Idle: cursor
-        parks in the input line. Working: cursor is saved/restored so agent output keeps the
-        scroll cursor (bar still updates to show what you type)."""
+    def finish_turn(self):
+        self._w("\r\n\r\n")                              # end the reply's last line + a blank
+        self._draw_bar(place_cursor=False)
+
+    def _draw_bar(self, place_cursor):
+        self._sized()
         cols = self.cols
         tag = f"[{friendly_name(self.model)}]"
         if len(f"╭─ redcoder · {tag} ") + 1 <= cols:
@@ -2416,22 +2403,29 @@ class LiveScreen:
         else:
             top = grey("╭─ "); tlen = 3
         top += grey("─" * max(0, cols - tlen - 1) + "╮")
-        inner = max(1, cols - 6)                          # "│ " + "› " + inner + " │"
+        inner = max(1, cols - 6)                          # "│ " + "› " + text + " │"
         shown = self.buf[-inner:] if len(self.buf) > inner else self.buf
         mid = grey("│ ") + green("› ") + shown + " " * (inner - len(shown)) + grey(" │")
         bot = grey("╰" + "─" * max(0, cols - 2) + "╯")
         r = self.scroll_bottom + 1
-        self._w("\x1b7")                                  # save cursor
+        self._w("\x1b7")                                  # save the scroll-region cursor
         self._w(f"\x1b[{r};1H\x1b[2K" + top)
         self._w(f"\x1b[{r+1};1H\x1b[2K" + mid)
         self._w(f"\x1b[{r+2};1H\x1b[2K" + bot)
-        if self.working.is_set():
-            self._w("\x1b8")                              # restore cursor to the scroll region
+        if place_cursor:
+            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor into the input line (while typing)
         else:
-            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor in the input line
-        self._real.flush()
+            self._w("\x1b8")                              # keep the cursor in the scroll region
+        sys.stdout.flush()
 
-    def _input_loop(self):
+    def read(self):
+        """Read one line at the pinned bar (blocking, main thread). Restores cooked mode before
+        returning so the agent turn (tool approvals, Ctrl-C interject) behaves normally.
+        Windows hold-Space push-to-talk preserved."""
+        self._sized()
+        self._w(f"\x1b[1;{self.scroll_bottom}r")          # re-assert region (handles resize)
+        self.buf = ""
+        self._draw_bar(place_cursor=True)
         old = None
         if not IS_WINDOWS:
             try:
@@ -2440,44 +2434,47 @@ class LiveScreen:
             except Exception:
                 old = None
         try:
-            while not self._stop.is_set():
+            while True:
+                if not self.buf and IS_WINDOWS and _VOICE and _key_down(VK_SPACE):
+                    time.sleep(0.12)
+                    while msvcrt and msvcrt.kbhit():
+                        msvcrt.getwch()
+                    if _key_down(VK_SPACE):
+                        text = _do_voice()
+                        if text.strip():
+                            return text
+                    continue
                 ch = _getch()
                 if ch is None:
-                    time.sleep(0.01); continue
+                    time.sleep(0.008); continue
                 if ch in ("\r", "\n"):
-                    with self.lock:
-                        line = self.buf; self.buf = ""; self._draw_bar()
-                    self.q.put(line)
-                elif ch == "\x03":
-                    self.q.put(_LIVE_INTERRUPT)
-                elif ch in ("\x00", "\xe0"):
+                    return self.buf
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\x00", "\xe0"):
                     if msvcrt:
                         msvcrt.getwch()
-                elif ch == "\x1b":
+                    continue
+                if ch == "\x1b":
                     try:
                         import select
                         while select.select([sys.stdin], [], [], 0.0)[0]:
                             sys.stdin.read(1)
                     except Exception:
                         pass
-                elif ch in ("\x08", "\x7f"):
-                    with self.lock:
-                        if self.buf:
-                            self.buf = self.buf[:-1]; self._draw_bar()
-                elif ch >= " ":
-                    with self.lock:
-                        self.buf += ch; self._draw_bar()
+                    continue
+                if ch in ("\x08", "\x7f"):
+                    if self.buf:
+                        self.buf = self.buf[:-1]; self._draw_bar(place_cursor=True)
+                    continue
+                if ch == " " and not self.buf and IS_WINDOWS and _VOICE:
+                    continue
+                if ch >= " ":
+                    self.buf += ch; self._draw_bar(place_cursor=True)
         finally:
             if old is not None:
                 import termios
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
-
-    def read(self):
-        """Block until a line is submitted (typed now, or queued while the agent worked)."""
-        line = self.q.get()
-        if line is _LIVE_INTERRUPT:
-            raise KeyboardInterrupt
-        return line
 
 
 def main(argv):
@@ -2774,20 +2771,16 @@ def main(argv):
             print(yellow(f"  unknown command: /{cmd}  (try /help)")); continue
 
         messages.append({"role": "user", "content": user})
-        if screen:
-            screen.set_working(True)                  # you can keep typing; Enter queues the line
         try:
             agent_turn(model, messages, approver)
         except RuntimeError as e:
             print(red(f"  ! {e}"))
         except KeyboardInterrupt:
             print(yellow("\n  (interrupted)"))
-        finally:
-            if screen:
-                screen.set_working(False)             # back to idle: cursor returns to the bar
-        print()
         if screen:
-            print()                                  # blank line: cleanly separate reply from next message
+            screen.finish_turn()                      # blank line + refresh the pinned bar
+        else:
+            print()
 
 
 if __name__ == "__main__":
