@@ -439,6 +439,15 @@ def purple(t): return c(t, "38;5;141")
 def orange(t): return c(t, "38;5;215")
 def pink(t):   return c(t, "38;5;211")
 
+# Claude-Code-style diff: full-width background + light foreground + a muted line-number gutter.
+# A diff line carries NO trailing reset in --live (the LiveScreen renderer pads the row so the bg
+# spans it, then resets); print mode appends its own reset.
+_DIFF_ADD_BG = "\x1b[48;5;22m"     # dark green background (added line)
+_DIFF_DEL_BG = "\x1b[48;5;52m"     # dark red background (removed line)
+_DIFF_ADD_FG = "\x1b[38;5;151m"    # light green text
+_DIFF_DEL_FG = "\x1b[38;5;217m"    # light red text
+_GUTTER_FG   = "\x1b[38;5;246m"    # muted line-number gutter
+
 
 # --------------------------------------------------------------------------- #
 #  Markdown -> terminal (ANSI) rendering
@@ -1551,7 +1560,8 @@ class StreamPrinter:
             self._emit_diff(line, color, prefix)
 
     def _emit_diff(self, line, color, prefix):
-        if prefix.startswith("+"):
+        is_add = prefix.startswith("+")
+        if is_add:
             self.added += 1
         else:
             self.removed += 1
@@ -1559,7 +1569,15 @@ class StreamPrinter:
             return
         if self.added + self.removed > CONSOLE_MAX_LINES:
             print(dim("    … (still going; live view capped)")); self.capped = True; return
-        print("    " + color(prefix + line))
+        if not _C:                                    # no color (piped / eval print mode): plain
+            print("    " + prefix + line); return
+        num = self.added if is_add else self.removed
+        bg = _DIFF_ADD_BG if is_add else _DIFF_DEL_BG
+        fg = _DIFF_ADD_FG if is_add else _DIFF_DEL_FG
+        mark = "+" if is_add else "-"
+        core = bg + "  " + _GUTTER_FG + f"{num:>4} " + fg + mark + " " + line
+        # --live: no trailing reset (renderer pads the row so the bg fills, then resets); else contained
+        print(core if (_LIVE and _LIVE_SCREEN is not None) else core + "\x1b[0m")
 
     # ---- finish ----------------------------------------------------------- #
     def finish(self):
@@ -2384,16 +2402,29 @@ def _wrap(s, width):
     this the wrapped part would jump to column 0. Returns >=1 lines, each <= width wide."""
     if width < 1 or _vis_len(s) <= width:
         return [s]
-    stripped = s.lstrip(" ")
-    indent = s[:len(s) - len(stripped)]               # the leading spaces, reused on every line
+    # capture leading SGR codes + literal-space indent; repeat BOTH on every continuation so a
+    # wrapped colored / diff-background line keeps its color and stays aligned under the first line.
+    i = 0
+    while True:
+        m = _SGR.match(s, i)
+        if not m:
+            break
+        i = m.end()
+    lead = s[:i]                                       # leading color/bg codes (invisible width)
+    j = i
+    while j < len(s) and s[j] == " ":
+        j += 1
+    indent = s[i:j]                                    # literal spaces after the color codes
+    prefix = lead + indent
+    body = s[j:]
     inner = max(1, width - len(indent))
     # tokenize the body into non-space runs (SGR glued on) and single spaces
     toks, buf, i = [], "", 0
-    while i < len(stripped):
-        m = _SGR.match(stripped, i)
+    while i < len(body):
+        m = _SGR.match(body, i)
         if m:
             buf += m.group(0); i = m.end(); continue
-        ch = stripped[i]; i += 1
+        ch = body[i]; i += 1
         if ch == " ":
             if buf:
                 toks.append(buf); buf = ""
@@ -2429,7 +2460,7 @@ def _wrap(s, width):
             line += seg; vis += segv
     if line != "" or not lines:
         lines.append(line)
-    return [indent + ln for ln in lines]
+    return [prefix + ln for ln in lines]
 
 
 def _hl_user(text):
@@ -2687,7 +2718,8 @@ class LiveScreen:
         out = [SYNC_ON, CUR_HIDE, "\x1b[H"]
         for i in range(view_h):
             line = visible[i] if i < len(visible) else ""
-            out.append(f"\x1b[{i+1};1H\x1b[2K" + line)
+            pad = max(0, cols - _vis_len(line))          # fill to full width: a bg color spans the row
+            out.append(f"\x1b[{i+1};1H" + line + " " * pad + "\x1b[0m")
         out.append(f"\x1b[{view_h+1};1H\x1b[2K")             # reserved blank row above the bar
         out += self._bar_rows(view_h + 2, cols)
         if self.input_mode:
