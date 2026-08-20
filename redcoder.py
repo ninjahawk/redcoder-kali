@@ -2969,8 +2969,9 @@ def main(argv):
             screen.enter()                       # from here, prints are captured into the pinned view
         except Exception:
             screen = None
-    if w >= 58:                          # banner AFTER enter() so it lands in the pinned view
-        print(red(BANNER))
+    if w >= 58:                          # banner AFTER enter() so it lands in the pinned view;
+        for _ln in BANNER.split("\n"):   # color EACH line red (one red()+reset per line survives the
+            print(red(_ln))              # line-buffer split — a single red(multi-line) only reddens L1)
     else:
         print("\n" + bold(red("  R E D C O D E R")) + "\n")
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
