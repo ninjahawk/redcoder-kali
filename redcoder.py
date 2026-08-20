@@ -1172,10 +1172,7 @@ def t_run_shell(args, approve):
         prefix, backend, err = _net_prefix(_NET_MODE)
         if err:
             raise ToolError(err)
-        if backend == "windows" and _NET_MODE != "online":
-            print(yellow("    ⚠ network isolation is Linux-only and is NOT enforced on "
-                         "Windows — this command may reach the internet"))
-        elif prefix:
+        if prefix:                    # Kali: firejail/unshare isolation prefix; empty on Windows
             argv = prefix + argv
 
     suffix = {"sealed": " · airgap", "lab": " · lab"}.get(_NET_MODE, "")
@@ -2536,6 +2533,8 @@ class LiveScreen:
         self._think_thread = None
         self._real_stdout = None
         self.input_mode = False       # True only while read() is waiting for input (shows the caret)
+        self.scroll_offset = 0        # >0 = scrolled up N lines (0 = following the latest output)
+        self._display_len = 0
         self._sized()
 
     def _sized(self):
@@ -2587,6 +2586,7 @@ class LiveScreen:
         if not s:
             return
         with self._lock:
+            self.scroll_offset = 0                                 # new output → follow the latest
             if self.thinking is not None:
                 self.thinking = None; self._think_stop.set()      # output began → drop the spinner
             for ch in s:
@@ -2600,6 +2600,7 @@ class LiveScreen:
 
     def emit_user(self, text):
         with self._lock:
+            self.scroll_offset = 0
             if self.pending:
                 self.lines.append(self.pending); self.pending = ""
             self._ensure_blank()
@@ -2628,14 +2629,11 @@ class LiveScreen:
             self._think_thread.start()
 
     def _think_run(self):
-        swap = time.time()
         while not self._think_stop.is_set():
             with self._lock:
                 if self.thinking is None:
                     break
-                self._spin_i += 1
-                if time.time() - swap > 1.7:
-                    self.thinking = _next_phrase(); swap = time.time()
+                self._spin_i += 1           # animate the glyph; the phrase holds for the whole turn
                 self._render_locked()
             self._think_stop.wait(0.09)
 
@@ -2657,6 +2655,14 @@ class LiveScreen:
         with self._lock:
             self._render_locked()
 
+    def scroll(self, delta):
+        """Scroll the output window by `delta` lines (+ up/older, - down/newer). Used at the bar via
+        PageUp/PageDown/arrows; any new output resets to follow the latest."""
+        with self._lock:
+            maxoff = max(0, self._display_len - self.view_h)
+            self.scroll_offset = max(0, min(maxoff, self.scroll_offset + delta))
+            self._render_locked()
+
     def _render_locked(self):
         self._sized()
         cols, view_h = self.cols, self.view_h
@@ -2673,7 +2679,11 @@ class LiveScreen:
         display = []
         for ln in content:
             display.extend(_wrap(ln, cols))
-        visible = display[-view_h:]                          # tail; oldest scrolls off the top
+        self._display_len = len(display)
+        maxoff = max(0, len(display) - view_h)
+        off = min(self.scroll_offset, maxoff)                # clamp (buffer may have grown/shrunk)
+        end = len(display) - off
+        visible = display[max(0, end - view_h):end]          # scrolled window (tail when off=0)
         out = [SYNC_ON, CUR_HIDE, "\x1b[H"]
         for i in range(view_h):
             line = visible[i] if i < len(visible) else ""
@@ -2767,17 +2777,27 @@ class LiveScreen:
                     return self.buf
                 if ch == "\x03":
                     raise KeyboardInterrupt
-                if ch in ("\x00", "\xe0"):
-                    if msvcrt:
-                        msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):                # Windows special keys (arrows/page)
+                    code = msvcrt.getwch() if msvcrt else ""
+                    page = max(1, self.view_h - 2)
+                    if   code == "I": self.scroll(page)   # PageUp
+                    elif code == "Q": self.scroll(-page)  # PageDown
+                    elif code == "H": self.scroll(3)      # Up arrow → scroll up a few
+                    elif code == "P": self.scroll(-3)     # Down arrow
                     continue
-                if ch == "\x1b":
+                if ch == "\x1b":                           # POSIX escape seq (arrows/page)
+                    seq = ""
                     try:
                         import select
-                        while select.select([sys.stdin], [], [], 0.0)[0]:
-                            sys.stdin.read(1)
+                        while select.select([sys.stdin], [], [], 0.02)[0]:
+                            seq += sys.stdin.read(1)
                     except Exception:
                         pass
+                    page = max(1, self.view_h - 2)
+                    if   seq == "[5~": self.scroll(page)   # PageUp
+                    elif seq == "[6~": self.scroll(-page)  # PageDown
+                    elif seq == "[A":  self.scroll(3)      # Up
+                    elif seq == "[B":  self.scroll(-3)     # Down
                     continue
                 if ch in ("\x08", "\x7f"):
                     if self.buf:
