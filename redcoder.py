@@ -2662,17 +2662,15 @@ class LiveScreen:
             spin = purple(_SPIN[self._spin_i % len(_SPIN)])
             content.append("")
             content.append("  " + spin + " " + dim(self.thinking + "…") + dim("   (Ctrl-C to interject)"))
-        # wrap every line to the width (nothing truncated), then show the tail BOTTOM-aligned so the
-        # newest content sits just above the bar (like a chat), not pinned to the top.
+        # wrap every line to the width (nothing truncated); output flows from the TOP (banner first)
+        # and scrolls once it fills — the newest content ends up just above the bar.
         display = []
         for ln in content:
             display.extend(_wrap(ln, cols))
-        visible = display[-view_h:]
-        pad = view_h - len(visible)                          # blank rows at the TOP when short
+        visible = display[-view_h:]                          # tail; oldest scrolls off the top
         out = [SYNC_ON, CUR_HIDE, "\x1b[H"]
         for i in range(view_h):
-            idx = i - pad
-            line = visible[idx] if 0 <= idx < len(visible) else ""
+            line = visible[i] if i < len(visible) else ""
             out.append(f"\x1b[{i+1};1H\x1b[2K" + line)
         out.append(f"\x1b[{view_h+1};1H\x1b[2K")             # reserved blank row above the bar
         out += self._bar_rows(view_h + 2, cols)
