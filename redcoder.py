@@ -1909,6 +1909,7 @@ def agent_turn(model, messages, approve):
             result = f"ERROR: {type(e).__name__}: {e}"
 
         show_tool_result(result)
+        print()  # blank line between the tool result and the model's next statement about it
         if len(result) > MAX_TOOL_OUTPUT:
             result = result[:MAX_TOOL_OUTPUT] + "\n…(truncated)"
         messages.append({"role": "user", "content": f"OBSERVATION ({action['name']}):\n{result}"})
