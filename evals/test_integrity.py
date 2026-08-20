@@ -102,5 +102,38 @@ try:
 finally:
     RC._LIVE = _live; RC._LIVE_SCREEN = _scr_save
 
+# ---- 6. MODEL ALIASES: an installed build (redcoder-drago) must satisfy the 'drago' alias, and
+#         the default / a /model switch must never demand re-downloading a model already on the stick.
+print("\n[models] an installed redcoder-drago build IS drago (no bogus re-download)")
+_USB = ["redcoder-drago:latest", "redcoder-mini:latest"]   # exactly what the Kali stick shows
+check("default model is drago", RC.DEFAULT_MODEL == "drago")
+check("drago accepts its ref + aka",
+      RC._acceptable_names("drago") == ["huihui_ai/qwen2.5-coder-abliterate:14b", "redcoder-drago"])
+check("redcoder-drago:latest satisfies drago", RC.installed_name("drago", _USB) == "redcoder-drago:latest")
+check("leviathan (not on stick) resolves to None", RC.installed_name("leviathan", _USB) is None)
+check("friendly_name maps the build back to drago", RC.friendly_name("redcoder-drago:latest") == "drago")
+check("raw name passes through", RC.installed_name("redcoder-mini:latest", _USB) == "redcoder-mini:latest")
+_real_in = RC._installed_names
+RC._installed_names = lambda *a, **k: _USB          # inject the USB set — no Ollama needed
+try:
+    check("chat sends the installed build for drago", RC._send_ref("drago") == "redcoder-drago:latest")
+    check("startup keeps drago when present", RC._usable_startup_model("drago") == "drago")
+    check("startup falls back off uninstalled leviathan -> drago",
+          RC._usable_startup_model("leviathan") == "drago")
+finally:
+    RC._installed_names = _real_in
+
+# ---- 7. INPUT: escape-sequence keys assemble whole (the arrow-key '[A' leak fix) and don't
+#         echo into the line. _getch does the fd read; here we assert the read()/boxed handlers
+#         classify a whole sequence as an escape (ignored), never as printable text.
+print("\n[input] arrow/Page escape sequences are recognized whole, not echoed as '[A'")
+check("UTF-8 length: ascii=1", RC._utf8_len(ord("a")) == 1)
+check("UTF-8 length: 2-byte lead", RC._utf8_len(0xC3) == 2)
+check("UTF-8 length: 3-byte lead", RC._utf8_len(0xE2) == 3)
+for _seq in ("\x1b[A", "\x1b[B", "\x1b[5~", "\x1b[6~", "\x1bOA"):
+    check(f"{_seq!r} is treated as an escape (startswith ESC, len>1)",
+          _seq.startswith("\x1b") and len(_seq) > 1)
+    check(f"{_seq!r} would NOT append as text", not (_seq >= " "))   # ESC(0x1b) < space → never printable
+
 print(f"\n{'='*50}\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)

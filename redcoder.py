@@ -86,20 +86,24 @@ except ImportError:
 VERSION = "1.0"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TAGS_URL = "http://127.0.0.1:11434/api/tags"
-DEFAULT_MODEL = "leviathan"   # a key in MODEL_REGISTRY below; /model switches or installs others
+DEFAULT_MODEL = "drago"       # a key in MODEL_REGISTRY below; /model switches or installs others
 
 # Dragon roster (see MODELS.md). Each friendly name maps to the actual abliterated Ollama
 # model redcoder runs. redcoder sends its own system prompt + sampling options every call, so
-# these run DIRECTLY off the base model — no `ollama create` step — which is what lets /model
-# install and switch them on the fly. `gb` = approx download size; `think: False` disables a
-# hybrid model's thinking so the JSON tool protocol stays clean.
+# these run DIRECTLY off the base model — no `ollama create` step needed. `gb` = approx download
+# size; `think: False` disables a hybrid model's thinking so the JSON tool protocol stays clean.
+# `aka` = alternate installed names that ALSO count as this model, so a Modelfile build made with
+# `ollama create redcoder-drago` is recognized as (and run as) drago — you don't have to also
+# download the raw ref. Matching is base-name, tag-insensitive (see installed_name()).
 MODEL_REGISTRY = {
     "drago": {
         "ref": "huihui_ai/qwen2.5-coder-abliterate:14b", "gb": 9,
+        "aka": ["redcoder-drago"],
         "desc": "14B coder — fast & light (~60 tok/s). Everyday baseline.",
     },
     "leviathan": {
         "ref": "huihui_ai/Qwen3.8-abliterated:27b", "gb": 18, "think": False,
+        "aka": ["redcoder-leviathan"],
         "desc": "27B dense — most capable, slow (~9 tok/s). Opus-style: smart but ponderous.",
     },
 }
@@ -114,9 +118,67 @@ def resolve_model(name):
 def friendly_name(name):
     """Reverse: show the dragon name for a known ref/key, else the name itself."""
     for k, e in MODEL_REGISTRY.items():
-        if k == name or e["ref"] == name:
+        if k == name or e["ref"] == name or name in e.get("aka", []) \
+                or name.split(":")[0] in e.get("aka", []):
             return k
     return name
+
+
+def _acceptable_names(model):
+    """Every Ollama name that counts as `model`: its registry ref plus any `aka` builds
+    (so an `ollama create redcoder-drago` build satisfies 'drago'). A raw name → just itself."""
+    e = MODEL_REGISTRY.get(model)
+    if not e:
+        return [model]
+    return [e["ref"]] + list(e.get("aka", []))
+
+
+def installed_name(model, names):
+    """The concrete installed Ollama name to run for `model`, or None if none is present.
+    Tries the registry ref and every `aka`, matching an installed tag on exact name first, then
+    on the base (tag-insensitive) — so `redcoder-drago:latest` is recognized as 'drago'.
+    `names` is the list of installed model tags (from /api/tags)."""
+    for cand in _acceptable_names(model):
+        cbase = cand.split(":")[0]
+        for n in names:
+            if n == cand:
+                return n
+        for n in names:
+            if n.split(":")[0] == cbase:
+                return n
+    return None
+
+
+# Short-lived cache of installed model names so the hot chat path doesn't re-hit /api/tags on
+# every step. TTL is tiny; a fresh /model install or switch is always seen within a few seconds
+# (and preflight/ensure_installed force a refresh at those moments).
+_TAGS_CACHE = {"t": 0.0, "names": []}
+
+
+def _installed_names(ttl=3.0, force=False):
+    """Installed Ollama model tags (briefly cached). Raises on connection failure."""
+    now = time.time()
+    if not force and _TAGS_CACHE["names"] and now - _TAGS_CACHE["t"] < ttl:
+        return _TAGS_CACHE["names"]
+    with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
+        names = [m.get("name", "") for m in json.load(r).get("models", [])]
+    _TAGS_CACHE["t"] = now
+    _TAGS_CACHE["names"] = names
+    return names
+
+
+def _send_ref(model):
+    """The ref to actually send to Ollama for `model`: the installed build if one is visible
+    (so 'drago' runs the on-disk redcoder-drago build instead of demanding a fresh download),
+    else the abstract registry ref (so the normal 'not installed' path still fires). Never
+    raises — on any lookup failure it falls back to resolve_model()."""
+    try:
+        hit = installed_name(model, _installed_names())
+        if hit:
+            return hit
+    except Exception:
+        pass
+    return resolve_model(model)
 
 
 # Remember the last model used (per machine), so a new session opens on it — like Claude Code.
@@ -508,7 +570,7 @@ def ollama_chat(model, messages, on_token=None):
     # top_p/repeat_penalty match what config/Modelfile.redcoder-drago baked in, so running a
     # base model ref directly behaves identically to the built model.
     payload = {
-        "model": resolve_model(model),
+        "model": _send_ref(model),
         "messages": messages,
         "stream": True,
         "options": {"temperature": 0.4, "top_p": 0.9, "repeat_penalty": 1.05,
@@ -1947,18 +2009,11 @@ Launch flags: run `redcoder --help` (includes --dangerously-skip-permissions, -p
 """
 
 
-def _model_installed(ref, names):
-    """True if `ref` (or its untagged base) appears in the installed `names`."""
-    base = ref.split(":")[0]
-    return any(n == ref or n.split(":")[0] == base for n in names)
-
-
 def preflight(model):
     ref = resolve_model(model)
     try:
-        with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
-            names = [m.get("name", "") for m in json.load(r).get("models", [])]
-        if _model_installed(ref, names):
+        names = _installed_names(force=True)     # fresh read at startup, and primes the cache
+        if installed_name(model, names):
             return True, f"model '{friendly_name(model)}' ready"
         return False, (f"Ollama is up but '{friendly_name(model)}' ({ref}) is not installed.\n"
                        f"    Type /model to install it (redcoder will offer to download it,\n"
@@ -2029,11 +2084,10 @@ def ensure_installed(model):
     Returns True when ready to use, False if declined or failed."""
     ref = resolve_model(model)
     try:
-        with urllib.request.urlopen(TAGS_URL, timeout=4) as r:
-            names = [m.get("name", "") for m in json.load(r).get("models", [])]
+        names = _installed_names(force=True)
     except Exception:
         print(red("  can't reach Ollama to check/install models.")); return False
-    if _model_installed(ref, names):
+    if installed_name(model, names):
         return True
     entry = MODEL_REGISTRY.get(model, {})
     need = entry.get("gb")
@@ -2056,6 +2110,7 @@ def ensure_installed(model):
     print(dim(f"  pulling {ref} … (Ctrl-C to abort)"))
     if subprocess.run([_ollama_bin(), "pull", ref]).returncode != 0:
         print(red("  pull failed.")); return False
+    _TAGS_CACHE["names"] = []                     # force a fresh read so the pull is seen at once
     print(green(f"  installed {label}.")); return True
 
 
@@ -2069,6 +2124,25 @@ def list_models():
     out = [(m.get("name", ""), (m.get("size", 0) or 0) / 1e9) for m in models if m.get("name")]
     out.sort(key=lambda t: t[1], reverse=True)
     return out
+
+
+def _usable_startup_model(preferred):
+    """Open the session on a model that's actually installed on THIS box. Keep `preferred` if it's
+    present (matched by ref or aka); otherwise fall back to the default, then any other installed
+    roster model, then the largest installed model. If Ollama can't be reached, return `preferred`
+    unchanged and let the normal offer-to-install path handle it. This is what stops a stick whose
+    saved 'last model' (e.g. leviathan) isn't installed from wedging every turn on 'not installed'."""
+    try:
+        names = _installed_names(force=True)
+    except Exception:
+        return preferred
+    if not names or installed_name(preferred, names):
+        return preferred
+    for cand in [DEFAULT_MODEL] + list(MODEL_REGISTRY.keys()):
+        if installed_name(cand, names):
+            return cand
+    installed = list_models()
+    return installed[0][0] if installed else preferred
 
 
 def pick_model(current):
@@ -2085,14 +2159,17 @@ def pick_model(current):
     print(bold("  Dragon roster:"))
     for i, k in enumerate(keys, 1):
         e = MODEL_REGISTRY[k]
-        got = _model_installed(e["ref"], installed)
+        got = installed_name(k, installed) is not None
         status = green("installed") if got else yellow(f"{e['gb']} GB download")
         cur = green(" ← current") if friendly_name(current) == k else ""
         print(f"    {cyan(str(i))}. {bold(k)}  {grey(e['desc'])}  [{status}]{cur}")
-    # Any other installed models not in the roster (e.g. legacy redcoder-drago).
-    roster_refs = {e["ref"] for e in MODEL_REGISTRY.values()}
-    others = [(n, gb) for n, gb in list_models()
-              if not any(n == rr or n.split(":")[0] == rr.split(":")[0] for rr in roster_refs)]
+    # Any OTHER installed models not already represented by a roster entry. A roster model's ref
+    # AND its aka builds (e.g. redcoder-drago == drago) are excluded so they don't double-list.
+    roster_bases = set()
+    for e in MODEL_REGISTRY.values():
+        for cand in [e["ref"]] + list(e.get("aka", [])):
+            roster_bases.add(cand.split(":")[0])
+    others = [(n, gb) for n, gb in list_models() if n.split(":")[0] not in roster_bases]
     base = len(keys)
     if others:
         print(grey("  other installed models:"))
@@ -2239,14 +2316,63 @@ def _wrap_words(text, width):
     return lines or [""]
 
 
+def _utf8_len(b0):
+    """Total byte length of a UTF-8 character from its first byte."""
+    if b0 >= 0xF0: return 4
+    if b0 >= 0xE0: return 3
+    if b0 >= 0xC0: return 2
+    return 1
+
+
 def _getch():
-    """One keystroke. Windows: non-blocking (None if nothing waiting, so we can poll for
-    push-to-talk). POSIX: blocking read of one char (terminal already in raw mode)."""
+    """One key from the terminal.
+    Windows: non-blocking single wide char (None if nothing is waiting, so we can poll for
+    push-to-talk). POSIX: blocking read of ONE logical key STRAIGHT FROM THE FD — either a
+    single (UTF-8) character, or a whole escape sequence like '\\x1b[A' returned atomically.
+
+    We read the fd with os.read rather than the buffered sys.stdin because sys.stdin.read(1)
+    reads AHEAD into a Python-level buffer that select() on the fd can't see: pressing an arrow
+    sends '\\x1b[A' at once, read(1) returns '\\x1b' and strands '[A' in that buffer, so the
+    escape parser finds nothing and the stranded '[A' later echoes into the line as literal text.
+    Reading the fd keeps the whole sequence together and select() stays truthful."""
     if IS_WINDOWS:
         if msvcrt and msvcrt.kbhit():
             return msvcrt.getwch()
         return None
-    return sys.stdin.read(1)
+    fd = sys.stdin.fileno()
+    try:
+        b = os.read(fd, 1)
+    except (OSError, ValueError):
+        return ""
+    if not b:
+        return ""                                  # EOF
+    if b == b"\x1b":                                # ESC — pull the rest of the sequence if it's there
+        seq = bytearray(b)
+        try:
+            import select
+            while select.select([fd], [], [], 0.02)[0]:
+                c = os.read(fd, 1)
+                if not c:
+                    break
+                seq += c
+                if len(seq) >= 3 and 0x40 <= seq[-1] <= 0x7E:  # CSI final byte (e.g. 'A' or '~')
+                    break
+                if len(seq) >= 8:                              # runaway guard
+                    break
+        except Exception:
+            pass
+        return seq.decode("latin-1", "replace")
+    need = _utf8_len(b[0])                          # normal key: finish a multibyte UTF-8 char
+    buf = bytearray(b)
+    while len(buf) < need:
+        try:
+            c = os.read(fd, 1)
+        except (OSError, ValueError):
+            break
+        if not c:
+            break
+        buf += c
+    return buf.decode("utf-8", "replace")
 
 
 def _read_boxed(W, prefill=""):
@@ -2309,7 +2435,7 @@ def _read_boxed(W, prefill=""):
                         collapse(text); return text
                 continue
             ch = _getch()
-            if ch is None:
+            if not ch:                                 # None (Windows idle) or "" (POSIX EOF)
                 time.sleep(0.008); continue
             if ch in ("\r", "\n"):
                 collapse(buf); return buf
@@ -2319,14 +2445,8 @@ def _read_boxed(W, prefill=""):
                 if msvcrt:
                     msvcrt.getwch()
                 continue
-            if ch == "\x1b":                            # POSIX escape seq (arrows) → drain
-                try:
-                    import select
-                    while select.select([sys.stdin], [], [], 0.0)[0]:
-                        sys.stdin.read(1)
-                except Exception:
-                    pass
-                continue
+            if ch.startswith("\x1b"):                   # POSIX escape seq (arrows/ESC) → ignore
+                continue                                # (_getch already consumed the whole sequence)
             if ch in ("\x08", "\x7f"):                  # backspace / DEL — re-wrap handles lines
                 if buf:
                     buf = buf[:-1]; render()
@@ -2764,7 +2884,7 @@ class LiveScreen:
         try:
             while True:
                 ch = _getch()
-                if ch is None:
+                if not ch or ch.startswith("\x1b"):    # idle/EOF, or an ignored escape key (arrows)
                     time.sleep(0.008); continue
                 if ch == "\x03":
                     ans = "n"; break
@@ -2804,7 +2924,7 @@ class LiveScreen:
                             return text
                     continue
                 ch = _getch()
-                if ch is None:
+                if not ch:                                # None (Windows idle) or "" (POSIX EOF)
                     time.sleep(0.008); continue
                 if ch in ("\r", "\n"):
                     return self.buf
@@ -2818,19 +2938,15 @@ class LiveScreen:
                     elif code == "H": self.scroll(3)      # Up arrow → scroll up a few
                     elif code == "P": self.scroll(-3)     # Down arrow
                     continue
-                if ch == "\x1b":                           # POSIX escape seq (arrows/page)
-                    seq = ""
-                    try:
-                        import select
-                        while select.select([sys.stdin], [], [], 0.02)[0]:
-                            seq += sys.stdin.read(1)
-                    except Exception:
-                        pass
+                if ch.startswith("\x1b") and len(ch) > 1:  # POSIX escape seq (arrows/page), read whole
+                    seq = ch[1:]
                     page = max(1, self.view_h - 2)
-                    if   seq == "[5~": self.scroll(page)   # PageUp
-                    elif seq == "[6~": self.scroll(-page)  # PageDown
-                    elif seq == "[A":  self.scroll(3)      # Up
-                    elif seq == "[B":  self.scroll(-3)     # Down
+                    if   seq == "[5~": self.scroll(page)       # PageUp
+                    elif seq == "[6~": self.scroll(-page)      # PageDown
+                    elif seq in ("[A", "OA"): self.scroll(3)   # Up   (normal + application-cursor mode)
+                    elif seq in ("[B", "OB"): self.scroll(-3)  # Down
+                    continue
+                if ch == "\x1b":                           # lone ESC — ignore
                     continue
                 if ch in ("\x08", "\x7f"):
                     if self.buf:
@@ -2913,6 +3029,7 @@ def main(argv):
     # Open on the last model used (like Claude Code) unless -m was given explicitly.
     if not model_explicit:
         model = load_last_model() or DEFAULT_MODEL
+        model = _usable_startup_model(model)  # if that model isn't on this box, fall back to one that is
     if not print_mode:                       # only interactive sessions set "last used" (not -p/evals)
         save_last_model(model)
 
