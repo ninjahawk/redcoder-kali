@@ -62,6 +62,7 @@ import fnmatch
 import importlib.util
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -1249,6 +1250,15 @@ class Approver:
         if self.auto and not force:
             print(dim(f"    auto ✓ {description.splitlines()[0]}"))
             return True
+        if _LIVE and _LIVE_SCREEN is not None:
+            # alt-screen can't cleanly echo line-input; approve with a single in-frame keypress.
+            ans = _LIVE_SCREEN.confirm(description, danger=force)
+            if force:
+                return ans == "y"
+            if not online and ans == "a":
+                self.auto = True
+                return True
+            return ans in ("y", "a")
         border = red if force else yellow
         tint = red if force else yellow
         if force:
@@ -1294,12 +1304,15 @@ class Spinner:
         self._thread = None
 
     def start(self):
-        # In --live the pinned bar owns the screen; a background thread writing the spinner
-        # races the main thread's bar redraws and corrupts the cursor (garble + text leaking
-        # BELOW the bar). Live streaming already shows motion, so skip the thread entirely.
-        if _C and not _LIVE:
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+        if not _C:
+            return self
+        # In --live the alt-screen renderer owns the terminal; drive its ominous spinner instead of
+        # writing from a second place (a stray writer would fight the single-writer render()).
+        if _LIVE and _LIVE_SCREEN is not None:
+            _LIVE_SCREEN.think_start()
+            return self
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
         return self
 
     def _run(self):
@@ -1325,6 +1338,9 @@ class Spinner:
         self.label = label
 
     def stop(self):
+        if _LIVE and _LIVE_SCREEN is not None:
+            _LIVE_SCREEN.think_stop()
+            return
         if self._stop.is_set():
             return
         self._stop.set()
@@ -2351,122 +2367,334 @@ def input_bar(model, prefill=None):
     return _read_boxed(w, prefill=prefill or "")
 
 
-_LIVE_INTERRUPT = object()   # sentinel: Ctrl-C came in on the input thread
+# ── --live terminal control ──────────────────────────────────────────────────────────────
+ALT_ON, ALT_OFF = "\x1b[?1049h", "\x1b[?1049l"     # alternate screen buffer (like vim/htop)
+CUR_HIDE, CUR_SHOW = "\x1b[?25l", "\x1b[?25h"
+SYNC_ON, SYNC_OFF = "\x1b[?2026h", "\x1b[?2026l"   # atomic frame paint (no flicker)
+WRAP_OFF, WRAP_ON = "\x1b[?7l", "\x1b[?7h"          # no autowrap: a long line can't push the frame
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
-class _LockedWriter:
-    """Serializes ALL writes to the real terminal on one lock so the input thread's bar
-    redraws and the main thread's agent output never interleave-corrupt. Installed as
-    sys.stdout during --live so ordinary print()s in the agent are coordinated too."""
-    def __init__(self, real, lock):
-        self._real = real
-        self._lock = lock
+def _clip(s, width):
+    """Clip a line to `width` VISIBLE columns while preserving its SGR color codes, so a long line
+    can never wrap and corrupt the absolute-positioned frame."""
+    out, vis, i = [], 0, 0
+    while i < len(s):
+        m = _SGR.match(s, i)
+        if m:
+            out.append(m.group(0)); i = m.end(); continue
+        if vis >= width:
+            break
+        out.append(s[i]); vis += 1; i += 1
+    if vis >= width:
+        out.append("\x1b[0m")
+    return "".join(out)
+
+
+def _hl_user(text):
+    """Claude-Code-style shaded highlight for a submitted user message."""
+    return "\x1b[48;5;238m\x1b[38;5;255m › " + text + " \x1b[0m"
+
+
+# Ominous-but-funny thinking phrases: single-word -ing actions, big pool so repeats are rare.
+_PHRASES = [
+    "Ominousing", "Hackening", "Darkening", "Sinistering", "Dreadening", "Spookening",
+    "Grimming", "Villaining", "Nefariousing", "Doomening", "Gloomening", "Wickedening",
+    "Eviling", "Cryptifying", "Malevolencing", "Skulduggering", "Spookifying", "Direning",
+    "Fiendishing", "Dastardlying", "Ghouling", "Wraithing", "Spectering", "Phantoming",
+    "Gremlining", "Boogeymanning", "Perilling", "Ghastlying", "Macabring", "Creepifying",
+    "Hexening", "Menacing", "Foreboding", "Nightmaring", "Lurking", "Skulking", "Creeping",
+    "Prowling", "Slithering", "Coiling", "Circling", "Stalking", "Looming", "Festering",
+    "Corroding", "Withering", "Haunting", "Shrouding", "Blackening", "Eclipsing", "Descending",
+    "Brooding", "Smoldering", "Scorching", "Snarling", "Hissing", "Cackling", "Conjuring",
+    "Summoning", "Invoking", "Channeling", "Hexing", "Cursing", "Seething", "Simmering",
+    "Whispering", "Plotting", "Scheming", "Brewing", "Kindling", "Hoarding", "Roaring",
+    "Fuming", "Charring", "Slinking", "Gnawing", "Skittering", "Breaching", "Rooting",
+    "Pwning", "Exploiting", "Injecting", "Escalating", "Enumerating", "Fuzzing", "Sniffing",
+    "Spoofing", "Cracking", "Bruteforcing", "Backdooring", "Payloading", "Rootkitting",
+    "Keylogging", "Phishing", "Pivoting", "Tunneling", "Exfiltrating", "Obfuscating",
+    "Scanning", "Probing", "Bypassing", "Hijacking", "Poisoning", "Snooping", "Intercepting",
+    "Daemonizing", "Ciphering", "Segfaulting", "Forking", "Nullifying", "Deauthing",
+]
+_phrase_deck = []
+
+
+def _next_phrase():
+    """Non-repeating pick from a shuffled deck (no repeats until the whole pool cycles)."""
+    global _phrase_deck
+    if not _phrase_deck:
+        _phrase_deck = _PHRASES[:]
+        random.shuffle(_phrase_deck)
+    return _phrase_deck.pop()
+
+
+_LIVE_SCREEN = None   # the active alt-screen LiveScreen (set in enter(), None after exit())
+
+
+class _LiveWriter:
+    """Installed as sys.stdout during --live: every print()/write() in the agent flows into the
+    LiveScreen's line buffer instead of straight to the terminal, so ONE renderer owns the screen."""
+    def __init__(self, screen, real):
+        self.screen = screen
+        self._real = real          # genuine stdout, kept for the on-exit history dump
 
     def write(self, s):
-        with self._lock:
-            self._real.write(s)
+        self.screen.feed(s)
         return len(s)
 
     def flush(self):
-        with self._lock:
-            self._real.flush()
+        pass
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
 
-def _hl_user(text):
-    """Claude-Code-style shaded highlight for a submitted user message. A medium grey block
-    (48;5;238) reads clearly on a near-black terminal; 236 was effectively invisible."""
-    return "\x1b[48;5;238m\x1b[38;5;255m › " + text + " \x1b[0m"
+def _raw_mode_on():
+    """Raw mode for single-keystroke reads; returns state to restore (None on Windows/no-tty)."""
+    if IS_WINDOWS:
+        return None
+    try:
+        import termios, tty
+        fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)
+        return old
+    except Exception:
+        return None
+
+
+def _raw_mode_off(old):
+    if old is not None:
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+        except Exception:
+            pass
 
 
 class LiveScreen:
-    """--live: a bottom-pinned input bar with agent output scrolling ABOVE it (Claude-Code
-    style), via a DECSTBM scroll region. SINGLE-THREADED: input is read on your turn (the bar
-    stays pinned the whole time), so tool approvals and Ctrl-C interject work normally (a
-    background reader would fight them for stdin). Submitted messages render as a shaded
-    highlight. Always reset the terminal via exit()."""
+    """--live: a bottom-pinned input bar with agent output scrolling above it, done the way that
+    actually holds up on Windows Terminal — the ALTERNATE SCREEN + an absolute full-frame repaint
+    each render (like Claude Code), NOT a DECSTBM scroll region (which drifts and piles output onto
+    the bar line — microsoft/terminal#19016). All output is captured into a line buffer via a
+    redirected sys.stdout; every frame positions each line by absolute coordinate, so cursor drift
+    is impossible, and a single locked render() is the ONLY writer, so the thinking-spinner thread
+    can't corrupt anything either. Always reset the terminal via exit()."""
     BAR_H = 3
 
     def __init__(self, model):
         self.model = model
-        self.buf = ""
+        self.buf = ""                 # current input-bar text
+        self.lines = []               # committed output lines (the scrollback)
+        self.pending = ""             # in-progress (un-newlined) output line
+        self.thinking = None          # None, or the ominous phrase shown while the model works
+        self._spin_i = 0
+        self._lock = threading.RLock()
+        self._think_stop = threading.Event()
+        self._think_thread = None
+        self._real_stdout = None
         self._sized()
 
     def _sized(self):
         try:
-            self.cols, self.rows = shutil.get_terminal_size((80, 24))
+            cols, rows = shutil.get_terminal_size((80, 24))
         except Exception:
-            self.cols, self.rows = 80, 24
-        self.cols = max(24, self.cols); self.rows = max(8, self.rows)
-        self.scroll_bottom = self.rows - self.BAR_H
+            cols, rows = 80, 24
+        self.cols = max(24, cols); self.rows = max(8, rows)
+        self.view_h = max(1, self.rows - self.BAR_H - 1)     # reserve 1 blank row above the bar
 
-    def _w(self, s):
-        sys.stdout.write(s); sys.stdout.flush()
-
+    # ── lifecycle ───────────────────────────────────────────────────────────────────────
     def enter(self):
-        self._sized()
-        self._w(f"\x1b[1;{self.scroll_bottom}r")         # scroll region = the top area
-        self._w(f"\x1b[{self.scroll_bottom};1H")         # output starts at the region bottom
-        self._draw_bar(place_cursor=False)
+        global _LIVE_SCREEN
+        self._real_stdout = sys.stdout
+        sys.stdout = _LiveWriter(self, self._real_stdout)
+        _LIVE_SCREEN = self
+        self._raw(ALT_ON + WRAP_OFF + "\x1b[2J" + CUR_HIDE)
+        self.render()
 
     def exit(self):
-        self._w("\x1b[?25h\x1b[r")                       # show cursor, release scroll region
-        self._w(f"\x1b[{self.rows};1H\n")
+        global _LIVE_SCREEN
+        self._think_stop_now()
+        self._raw(SYNC_OFF + WRAP_ON + CUR_SHOW + ALT_OFF)
+        if isinstance(sys.stdout, _LiveWriter):
+            sys.stdout = self._real_stdout
+        _LIVE_SCREEN = None
+        try:                                                  # keep history after leaving alt-screen
+            body = "\n".join(self.lines).rstrip("\n")
+            if body:
+                self._real_stdout.write(body + "\n"); self._real_stdout.flush()
+        except Exception:
+            pass
 
-    def to_scroll(self):
-        self._w(f"\x1b[{self.scroll_bottom};1H")         # next output lands above the bar
+    def _raw(self, s):
+        """Write straight to the real terminal, bypassing the buffer (frames + control only)."""
+        out = self._real_stdout or sys.__stdout__
+        try:
+            out.write(s); out.flush()
+        except Exception:
+            pass
+
+    # ── the output buffer ─────────────────────────────────────────────────────────────────
+    def _ensure_blank(self):
+        if self.lines and self.lines[-1] != "":
+            self.lines.append("")
+
+    def feed(self, s):
+        """Capture agent output into lines. Splits on \\n; \\r overwrites the current line."""
+        if not s:
+            return
+        with self._lock:
+            if self.thinking is not None:
+                self.thinking = None; self._think_stop.set()      # output began → drop the spinner
+            for ch in s:
+                if ch == "\n":
+                    self.lines.append(self.pending); self.pending = ""
+                elif ch == "\r":
+                    self.pending = ""
+                else:
+                    self.pending += ch
+            self._render_locked()
 
     def emit_user(self, text):
-        self._w(f"\x1b[{self.scroll_bottom};1H")
-        self._w(_hl_user(text) + "\r\n\r\n")             # shaded message + blank; cursor stays in scroll
-        self.buf = ""
+        with self._lock:
+            if self.pending:
+                self.lines.append(self.pending); self.pending = ""
+            self._ensure_blank()
+            self.lines.append(_hl_user(text))
+            self.buf = ""
+            self._render_locked()
+
+    def to_scroll(self):
+        pass                          # no-op: output is captured via feed(); call site kept stable
 
     def finish_turn(self):
-        self._w("\r\n\r\n")                              # end the reply's last line + a blank
-        self._draw_bar(place_cursor=False)
+        self._think_stop_now()          # no lingering spinner after a turn (incl. Ctrl-C interject)
+        with self._lock:
+            if self.pending:
+                self.lines.append(self.pending); self.pending = ""
+            self._render_locked()
 
-    def _draw_bar(self, place_cursor):
+    # ── ominous thinking spinner (single writer = render, so the thread is safe) ────────────
+    def think_start(self):
+        with self._lock:
+            self.thinking = _next_phrase()
+        self._think_stop.clear()
+        if self._think_thread is None or not self._think_thread.is_alive():
+            self._think_thread = threading.Thread(target=self._think_run, daemon=True)
+            self._think_thread.start()
+
+    def _think_run(self):
+        swap = time.time()
+        while not self._think_stop.is_set():
+            with self._lock:
+                if self.thinking is None:
+                    break
+                self._spin_i += 1
+                if time.time() - swap > 1.7:
+                    self.thinking = _next_phrase(); swap = time.time()
+                self._render_locked()
+            self._think_stop.wait(0.09)
+
+    def _think_stop_now(self):
+        self._think_stop.set()
+        t = self._think_thread
+        if t and t.is_alive():
+            t.join(timeout=0.3)
+        with self._lock:
+            self.thinking = None
+
+    def think_stop(self):
+        self._think_stop_now()
+        with self._lock:
+            self._render_locked()
+
+    # ── render — the ONLY writer to the terminal ────────────────────────────────────────────
+    def render(self):
+        with self._lock:
+            self._render_locked()
+
+    def _render_locked(self):
         self._sized()
-        cols = self.cols
+        cols, view_h = self.cols, self.view_h
+        content = list(self.lines)
+        if self.pending:
+            content.append(self.pending)
+        if self.thinking is not None:
+            spin = purple(_SPIN[self._spin_i % len(_SPIN)])
+            content.append("")
+            content.append("  " + spin + " " + dim(self.thinking + "…") + dim("   (Ctrl-C to interject)"))
+        visible = content[-view_h:]
+        out = [SYNC_ON, CUR_HIDE, "\x1b[H"]
+        for i in range(view_h):
+            line = visible[i] if i < len(visible) else ""
+            out.append(f"\x1b[{i+1};1H\x1b[2K" + _clip(line, cols))
+        out.append(f"\x1b[{view_h+1};1H\x1b[2K")             # reserved blank row above the bar
+        out += self._bar_rows(view_h + 2, cols)
+        out.append(SYNC_OFF)
+        self._raw("".join(out))
+
+    def _bar_rows(self, r, cols):
         tag = f"[{friendly_name(self.model)}]"
-        if len(f"╭─ redcoder · {tag} ") + 1 <= cols:
-            top = grey("╭─ ") + bold(red("redcoder")) + grey(" · ") + blue(tag) + " "
-            tlen = len(f"╭─ redcoder · {tag} ")
+        label = f"╭─ redcoder · {tag} "
+        if len(label) + 1 <= cols:
+            top = grey("╭─ ") + bold(red("redcoder")) + grey(" · ") + blue(tag) + " " \
+                  + grey("─" * max(0, cols - len(label) - 1) + "╮")
         else:
-            top = grey("╭─ "); tlen = 3
-        top += grey("─" * max(0, cols - tlen - 1) + "╮")
-        inner = max(1, cols - 6)                          # "│ " + "› " + text + " │"
+            top = grey("╭─ " + "─" * max(0, cols - 4) + "╮")
+        inner = max(1, cols - 4)
         shown = self.buf[-inner:] if len(self.buf) > inner else self.buf
-        mid = grey("│ ") + green("› ") + shown + " " * (inner - len(shown)) + grey(" │")
+        mid = grey("│ ") + green("› ") + shown + " " * max(0, inner - len(shown) - 2) + grey(" │")
         bot = grey("╰" + "─" * max(0, cols - 2) + "╯")
-        r = self.scroll_bottom + 1
-        self._w("\x1b7")                                  # save the scroll-region cursor
-        self._w(f"\x1b[{r};1H\x1b[2K" + top)
-        self._w(f"\x1b[{r+1};1H\x1b[2K" + mid)
-        self._w(f"\x1b[{r+2};1H\x1b[2K" + bot)
-        if place_cursor:
-            self._w(f"\x1b[{r+1};{4 + len(shown) + 1}H")  # cursor into the input line (while typing)
-        else:
-            self._w("\x1b8")                              # keep the cursor in the scroll region
-        sys.stdout.flush()
+        return [f"\x1b[{r};1H\x1b[2K" + top,
+                f"\x1b[{r+1};1H\x1b[2K" + mid,
+                f"\x1b[{r+2};1H\x1b[2K" + bot,
+                f"\x1b[{r+1};{4 + len(shown) + 1}H"]         # park cursor in the input line
+
+    def confirm(self, description, danger=False):
+        """In-frame approval: render the permission text into the buffer, then read ONE keypress at
+        the bar (alt-screen can't cleanly echo line-input). Returns 'y' | 'n' | 'a'."""
+        with self._lock:
+            if self.pending:
+                self.lines.append(self.pending); self.pending = ""
+            self._ensure_blank()
+            tint = red if danger else yellow
+            self.lines.append(tint("  ┌─ " + ("⚠ DANGEROUS COMMAND" if danger else "permission") + " ─"))
+            for ln in description.splitlines():
+                self.lines.append(tint("  │ ") + ln)
+            self.lines.append(tint("  └─"))
+            self._render_locked()
+        self.buf = ("Run anyway? [y/N]  " if danger else "Allow? [Y/n/a]  ")
+        self.render()
+        old = _raw_mode_on()
+        try:
+            while True:
+                ch = _getch()
+                if ch is None:
+                    time.sleep(0.008); continue
+                if ch == "\x03":
+                    ans = "n"; break
+                if ch in ("y", "Y"):
+                    ans = "y"; break
+                if ch in ("n", "N"):
+                    ans = "n"; break
+                if ch in ("a", "A") and not danger:
+                    ans = "a"; break
+                if ch in ("\r", "\n"):
+                    ans = "n" if danger else "y"; break
+        finally:
+            _raw_mode_off(old)
+        self.buf = ""
+        with self._lock:
+            self.lines.append(dim("  → " + ("allowed" if ans in ("y", "a") else "denied")))
+            self._render_locked()
+        return ans
 
     def read(self):
         """Read one line at the pinned bar (blocking, main thread). Restores cooked mode before
         returning so the agent turn (tool approvals, Ctrl-C interject) behaves normally.
         Windows hold-Space push-to-talk preserved."""
-        self._sized()
-        self._w(f"\x1b[1;{self.scroll_bottom}r")          # re-assert region (handles resize)
         self.buf = ""
-        self._draw_bar(place_cursor=True)
-        old = None
-        if not IS_WINDOWS:
-            try:
-                import termios, tty
-                fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)
-            except Exception:
-                old = None
+        self._raw(CUR_SHOW)
+        self.render()
+        old = _raw_mode_on()
         try:
             while True:
                 if not self.buf and IS_WINDOWS and _VOICE and _key_down(VK_SPACE):
@@ -2499,16 +2727,15 @@ class LiveScreen:
                     continue
                 if ch in ("\x08", "\x7f"):
                     if self.buf:
-                        self.buf = self.buf[:-1]; self._draw_bar(place_cursor=True)
+                        self.buf = self.buf[:-1]; self.render()
                     continue
                 if ch == " " and not self.buf and IS_WINDOWS and _VOICE:
                     continue
                 if ch >= " ":
-                    self.buf += ch; self._draw_bar(place_cursor=True)
+                    self.buf += ch; self.render()
         finally:
-            if old is not None:
-                import termios
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+            self._raw(CUR_HIDE)
+            _raw_mode_off(old)
 
 
 def main(argv):
@@ -2630,6 +2857,15 @@ def main(argv):
         # space if the disk is tight) so a fresh stick isn't stuck on a missing model.
         if ensure_installed(model):
             ok, status = preflight(model)
+    screen = None
+    if _LIVE and _C:
+        try:
+            import atexit
+            screen = LiveScreen(model)
+            atexit.register(lambda: os.write(1, b"\x1b[?1049l\x1b[?25h\x1b[?7h"))  # restore terminal
+            screen.enter()                       # from here, prints are captured into the pinned view
+        except Exception:
+            screen = None
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
@@ -2663,16 +2899,6 @@ def main(argv):
     approver = Approver(auto)
     messages = [{"role": "system", "content": build_system(model)}]
     pending = prompt
-
-    screen = None
-    if _LIVE and _C:
-        try:
-            import atexit
-            screen = LiveScreen(model)
-            atexit.register(lambda: os.write(1, b"\x1b[r"))       # always release scroll region (raw fd)
-            screen.enter()
-        except Exception:
-            screen = None
 
     while True:
         try:

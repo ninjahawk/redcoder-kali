@@ -88,16 +88,19 @@ finally:
     RC._NO_SHELL = _ns
 
 # ---- 5. Spinner never spawns a writer thread in --live (the concurrency fix), else does
-print("\n[tui] spinner thread is suppressed in --live, active otherwise")
-_live = RC._LIVE
+print("\n[tui] spinner delegates to the live screen in --live, threads otherwise")
+_live, _scr_save = RC._LIVE, RC._LIVE_SCREEN
 try:
+    import io
     RC._C = True                                  # pretend a color TTY so start() would spawn
     RC._LIVE = True
-    sp = RC.Spinner("x").start(); check("live: no spinner thread", sp._thread is None); sp.stop()
+    _scr = RC.LiveScreen("drago"); _scr._real_stdout = io.StringIO(); RC._LIVE_SCREEN = _scr
+    sp = RC.Spinner("x").start(); check("live: delegates, no thread", sp._thread is None); sp.stop()
+    RC._LIVE_SCREEN = None
     RC._LIVE = False
     sp2 = RC.Spinner("x").start(); check("non-live: spinner thread runs", sp2._thread is not None); sp2.stop()
 finally:
-    RC._LIVE = _live
+    RC._LIVE = _live; RC._LIVE_SCREEN = _scr_save
 
 print(f"\n{'='*50}\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)
