@@ -2382,17 +2382,21 @@ def _vis_len(s):
 
 def _wrap(s, width):
     """Word-wrap `s` to `width` visible columns, preserving SGR color codes; NEVER truncates.
-    Long output must wrap to the next line (autowrap is off so the absolute frame can't be pushed),
-    otherwise a paragraph shows only its first line. Returns a list of >=1 lines, each <= width wide."""
+    Continuation lines keep the first line's leading indent (hanging indent) so a wrapped paragraph
+    stays aligned under its own text — redcoder indents every prose line by 2 spaces, and without
+    this the wrapped part would jump to column 0. Returns >=1 lines, each <= width wide."""
     if width < 1 or _vis_len(s) <= width:
         return [s]
-    # tokenize into non-space runs (SGR glued on) and single spaces
+    stripped = s.lstrip(" ")
+    indent = s[:len(s) - len(stripped)]               # the leading spaces, reused on every line
+    inner = max(1, width - len(indent))
+    # tokenize the body into non-space runs (SGR glued on) and single spaces
     toks, buf, i = [], "", 0
-    while i < len(s):
-        m = _SGR.match(s, i)
+    while i < len(stripped):
+        m = _SGR.match(stripped, i)
         if m:
             buf += m.group(0); i = m.end(); continue
-        ch = s[i]; i += 1
+        ch = stripped[i]; i += 1
         if ch == " ":
             if buf:
                 toks.append(buf); buf = ""
@@ -2406,29 +2410,29 @@ def _wrap(s, width):
         if tok == " ":
             if vis == 0:
                 continue                              # no leading space after a wrap
-            if vis + 1 > width:
+            if vis + 1 > inner:
                 lines.append(line); line, vis = "", 0
             else:
                 line += " "; vis += 1
             continue
         tv = _vis_len(tok)
-        if vis + tv <= width:
+        if vis + tv <= inner:
             line += tok; vis += tv
-        elif tv <= width:                             # word fits on its own line
+        elif tv <= inner:                             # word fits on its own line
             lines.append(line); line, vis = tok, tv
-        else:                                         # word longer than width: hard-split it
+        else:                                         # word longer than the width: hard-split it
             j, seg, segv = 0, "", 0
             while j < len(tok):
                 m = _SGR.match(tok, j)
                 if m:
                     seg += m.group(0); j = m.end(); continue
-                if vis + segv >= width:
+                if vis + segv >= inner:
                     lines.append(line + seg); line, vis, seg, segv = "", 0, "", 0
                 seg += tok[j]; segv += 1; j += 1
             line += seg; vis += segv
     if line != "" or not lines:
         lines.append(line)
-    return lines
+    return [indent + ln for ln in lines]
 
 
 def _hl_user(text):
@@ -2600,6 +2604,7 @@ class LiveScreen:
                 self.lines.append(self.pending); self.pending = ""
             self._ensure_blank()
             self.lines.append(_hl_user(text))
+            self.lines.append("")             # blank between the message and the reply below it
             self.buf = ""
             self._render_locked()
 
@@ -2660,7 +2665,8 @@ class LiveScreen:
             content.append(self.pending)
         if self.thinking is not None:
             spin = purple(_SPIN[self._spin_i % len(_SPIN)])
-            content.append("")
+            if content and content[-1] != "":                # don't double-blank after a message
+                content.append("")
             content.append("  " + spin + " " + dim(self.thinking + "…") + dim("   (Ctrl-C to interject)"))
         # wrap every line to the width (nothing truncated); output flows from the TOP (banner first)
         # and scrolls once it fills — the newest content ends up just above the bar.
