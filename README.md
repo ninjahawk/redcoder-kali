@@ -94,6 +94,18 @@ redcoder
 Ollama if missing, configures the server for a q8_0 KV cache, pulls the base model,
 builds the `redcoder-drago` model, and installs the launcher.
 
+### Updating
+
+Once installed, pull the latest any time (you'll need internet — separate from redcoder's
+own `/net` mode) from inside the `redcoder-kali` folder:
+
+```bash
+./update.sh
+```
+
+It fast-forwards to the published version. Your own data — `redcoder.md` checkpoints and
+`evals/runs` — is untracked and left untouched.
+
 ---
 
 ## What differs from the Windows build
