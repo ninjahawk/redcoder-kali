@@ -2375,20 +2375,60 @@ WRAP_OFF, WRAP_ON = "\x1b[?7l", "\x1b[?7h"          # no autowrap: a long line c
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _clip(s, width):
-    """Clip a line to `width` VISIBLE columns while preserving its SGR color codes, so a long line
-    can never wrap and corrupt the absolute-positioned frame."""
-    out, vis, i = [], 0, 0
+def _vis_len(s):
+    """Visible width of a string, ignoring SGR color codes."""
+    return len(_SGR.sub("", s))
+
+
+def _wrap(s, width):
+    """Word-wrap `s` to `width` visible columns, preserving SGR color codes; NEVER truncates.
+    Long output must wrap to the next line (autowrap is off so the absolute frame can't be pushed),
+    otherwise a paragraph shows only its first line. Returns a list of >=1 lines, each <= width wide."""
+    if width < 1 or _vis_len(s) <= width:
+        return [s]
+    # tokenize into non-space runs (SGR glued on) and single spaces
+    toks, buf, i = [], "", 0
     while i < len(s):
         m = _SGR.match(s, i)
         if m:
-            out.append(m.group(0)); i = m.end(); continue
-        if vis >= width:
-            break
-        out.append(s[i]); vis += 1; i += 1
-    if vis >= width:
-        out.append("\x1b[0m")
-    return "".join(out)
+            buf += m.group(0); i = m.end(); continue
+        ch = s[i]; i += 1
+        if ch == " ":
+            if buf:
+                toks.append(buf); buf = ""
+            toks.append(" ")
+        else:
+            buf += ch
+    if buf:
+        toks.append(buf)
+    lines, line, vis = [], "", 0
+    for tok in toks:
+        if tok == " ":
+            if vis == 0:
+                continue                              # no leading space after a wrap
+            if vis + 1 > width:
+                lines.append(line); line, vis = "", 0
+            else:
+                line += " "; vis += 1
+            continue
+        tv = _vis_len(tok)
+        if vis + tv <= width:
+            line += tok; vis += tv
+        elif tv <= width:                             # word fits on its own line
+            lines.append(line); line, vis = tok, tv
+        else:                                         # word longer than width: hard-split it
+            j, seg, segv = 0, "", 0
+            while j < len(tok):
+                m = _SGR.match(tok, j)
+                if m:
+                    seg += m.group(0); j = m.end(); continue
+                if vis + segv >= width:
+                    lines.append(line + seg); line, vis, seg, segv = "", 0, "", 0
+                seg += tok[j]; segv += 1; j += 1
+            line += seg; vis += segv
+    if line != "" or not lines:
+        lines.append(line)
+    return lines
 
 
 def _hl_user(text):
@@ -2491,6 +2531,7 @@ class LiveScreen:
         self._think_stop = threading.Event()
         self._think_thread = None
         self._real_stdout = None
+        self.input_mode = False       # True only while read() is waiting for input (shows the caret)
         self._sized()
 
     def _sized(self):
@@ -2621,13 +2662,22 @@ class LiveScreen:
             spin = purple(_SPIN[self._spin_i % len(_SPIN)])
             content.append("")
             content.append("  " + spin + " " + dim(self.thinking + "…") + dim("   (Ctrl-C to interject)"))
-        visible = content[-view_h:]
+        # wrap every line to the width (nothing truncated), then show the tail BOTTOM-aligned so the
+        # newest content sits just above the bar (like a chat), not pinned to the top.
+        display = []
+        for ln in content:
+            display.extend(_wrap(ln, cols))
+        visible = display[-view_h:]
+        pad = view_h - len(visible)                          # blank rows at the TOP when short
         out = [SYNC_ON, CUR_HIDE, "\x1b[H"]
         for i in range(view_h):
-            line = visible[i] if i < len(visible) else ""
-            out.append(f"\x1b[{i+1};1H\x1b[2K" + _clip(line, cols))
+            idx = i - pad
+            line = visible[idx] if 0 <= idx < len(visible) else ""
+            out.append(f"\x1b[{i+1};1H\x1b[2K" + line)
         out.append(f"\x1b[{view_h+1};1H\x1b[2K")             # reserved blank row above the bar
         out += self._bar_rows(view_h + 2, cols)
+        if self.input_mode:
+            out.append(CUR_SHOW)                              # show the caret at the input line
         out.append(SYNC_OFF)
         self._raw("".join(out))
 
@@ -2692,7 +2742,7 @@ class LiveScreen:
         returning so the agent turn (tool approvals, Ctrl-C interject) behaves normally.
         Windows hold-Space push-to-talk preserved."""
         self.buf = ""
-        self._raw(CUR_SHOW)
+        self.input_mode = True          # render() shows + positions the caret while we read
         self.render()
         old = _raw_mode_on()
         try:
@@ -2734,7 +2784,8 @@ class LiveScreen:
                 if ch >= " ":
                     self.buf += ch; self.render()
         finally:
-            self._raw(CUR_HIDE)
+            self.input_mode = False
+            self.render()               # repaint with the caret hidden again
             _raw_mode_off(old)
 
 
@@ -2847,10 +2898,6 @@ def main(argv):
 
     # -------- interactive REPL ----------------------------------------------
     w = _term_width()
-    if w >= 58:
-        print(red(BANNER))
-    else:
-        print("\n" + bold(red("  R E D C O D E R")) + "\n")
     ok, status = preflight(model)
     if not ok and model in MODEL_REGISTRY:
         # The default/selected model isn't installed yet — offer to download it (and free
@@ -2866,6 +2913,10 @@ def main(argv):
             screen.enter()                       # from here, prints are captured into the pinned view
         except Exception:
             screen = None
+    if w >= 58:                          # banner AFTER enter() so it lands in the pinned view
+        print(red(BANNER))
+    else:
+        print("\n" + bold(red("  R E D C O D E R")) + "\n")
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
