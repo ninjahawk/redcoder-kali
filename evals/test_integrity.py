@@ -152,6 +152,11 @@ print("\n[web] web tools registered; advertised & allowed only when usable; PC i
 check("web tools dispatch in run_tool",
       all(f'name == "{t}"' in __import__("inspect").getsource(RC.run_tool) for t in ("web_search", "web_fetch")))
 check("t_web_search / t_web_fetch defined", hasattr(RC, "t_web_search") and hasattr(RC, "t_web_fetch"))
+# The agent validates tool calls against TOOL_NAMES BEFORE dispatch — if a tool is dispatchable
+# but not in TOOL_NAMES, the loop rejects it as a 'fake tool' and never runs it (caught live by
+# evals/web_eval.py: the model emitted web_search and got 'no tool named web_search').
+check("web tools registered in TOOL_NAMES (or the loop rejects them)",
+      "web_search" in RC.TOOL_NAMES and "web_fetch" in RC.TOOL_NAMES)
 _sk, _nm = RC._FORCE_KALI, RC._NET_MODE
 try:
     RC._FORCE_KALI = False; RC._NET_MODE = "online"          # this PC

@@ -490,6 +490,22 @@ def build_system(model=None):
                 "relative path (e.g. notes.txt) or a full absolute path — never embed a shell "
                 "variable like $HOME, $env:USERPROFILE, or %USERPROFILE% in a tool path.")
     parts = [base, net, env_note]
+    if web_on:
+        # Carve an explicit exception to the "answer from your own knowledge / least work"
+        # rule: for things that change over time your memory is stale, so look them up — and
+        # never fake a citation. (Added after an eval showed the model answering version
+        # questions from stale memory, with fabricated "as listed on <site>" sources.)
+        parts.append(
+            "# Looking things up — your training is frozen and out of date\n"
+            "Your knowledge has a cutoff and today is later than that, so anything that CHANGES "
+            "over time you do NOT reliably know: latest/current version numbers, releases, dates, "
+            "prices, standings, who currently holds a role, recent events. For those, this "
+            "OVERRIDES 'answer from your own knowledge' — call web_search FIRST and answer from "
+            "what it returns, even if a value comes to mind; do not treat 'least work' as license "
+            "to guess a fact that has a current value. Use web_fetch to read a specific page for "
+            "detail or to confirm. NEVER state or imply you consulted a source (e.g. \"as listed "
+            "on go.dev\") unless you actually called web_fetch on it this turn — no invented "
+            "citations. If a search returns nothing usable, say so plainly rather than guessing.")
     if model is not None:
         parts.append(_identity_note(model, kali_ctx))
     return "\n\n".join(parts)
@@ -670,6 +686,7 @@ def ollama_chat(model, messages, on_token=None):
 # --------------------------------------------------------------------------- #
 TOOL_NAMES = {
     "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "run_shell",
+    "web_search", "web_fetch",
 }
 
 
