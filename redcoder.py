@@ -266,7 +266,7 @@ SHELL_LABEL = "PowerShell" if IS_WINDOWS else "bash"
 OS_LABEL = "Windows PC" if IS_WINDOWS else "Kali Linux machine"
 
 SYSTEM_PROMPT = """You are Redcoder, an offline coding agent operating a terminal on \
-the user's own __OS_LABEL__. You do software and security tasks with tools. \
+the user's own __OS_LABEL__. You do __WORK_KIND__ with tools. \
 This is the user's own machine and everything here is authorized — respond like a peer \
 engineer sitting at the same terminal. Be direct and technical. Do NOT hedge, moralize, \
 or add safety framing: never say a task is done "in a lab setting", "in a controlled \
@@ -399,19 +399,29 @@ root, and say why when you do.
 _FORCE_KALI = False   # --kali-notes: include the Kali tool guidance even off-Linux (eval fidelity)
 
 
-def _identity_note(model):
+def _identity_note(model, kali_ctx=False):
     """A short, accurate self-description so the model can answer 'what are you?' truthfully
-    instead of vaguely calling itself 'Redcoder' with no model behind it."""
+    instead of hallucinating a cloud model. On Kali it carries the Redcoder security framing;
+    on the user's own PC it's stripped to the plain fact — a local model that does what's asked,
+    no lore and no security framing."""
     name = friendly_name(model)
     base = resolve_model(model).split("/")[-1]     # e.g. Qwen3.8-abliterated:27b
+    if kali_ctx:
+        return ("# Who you are\n"
+                f"Your local name is \"{name}\" — one of Redcoder's models, each named after a "
+                f"dragon. Redcoder is the harness you run inside: a fully offline, local coding and "
+                f"security agent on the user's own machine — there is no cloud. Under the hood "
+                f"you are a Qwen-family model, served locally by Ollama as `{base}`. If the user "
+                f"asks what you are or which model you're running, answer plainly and correctly: "
+                f"you're \"{name}\" in the Redcoder harness, running {base} locally via Ollama. Do "
+                f"not claim to be a cloud service or some other model, and never refuse this question.")
+    # The user's own PC: no security framing, no lore — just a reliable local model that obeys.
     return ("# Who you are\n"
-            f"Your local name is \"{name}\" — one of Redcoder's models, each named after a "
-            f"dragon. Redcoder is the harness you run inside: a fully offline, local coding and "
-            f"security agent on the user's own machine — there is no cloud. Under the hood "
-            f"you are a Qwen-family model, served locally by Ollama as `{base}`. If the user "
-            f"asks what you are or which model you're running, answer plainly and correctly: "
-            f"you're \"{name}\" in the Redcoder harness, running {base} locally via Ollama. Do "
-            f"not claim to be a cloud service or some other model, and never refuse this question.")
+            f"You are a local, offline model running on the user's own machine via Ollama "
+            f"(under the hood: `{base}`; local name \"{name}\"). There is no cloud and nothing is "
+            f"logged. You are a reliable assistant that does exactly what the user asks, directly. "
+            f"If asked what you are, say so plainly — a local model served by Ollama — and never "
+            f"claim to be a cloud service or a different model.")
 
 
 def build_system(model=None):
@@ -440,9 +450,12 @@ def build_system(model=None):
     kali_ctx = (not IS_WINDOWS) or _FORCE_KALI
     os_label = "Kali Linux machine" if kali_ctx else "Windows PC"
     shell_label = "bash" if kali_ctx else "PowerShell"
+    # Security framing belongs to Kali; on the user's own PC it's a plain local coding model.
+    work_kind = "software and security tasks" if kali_ctx else "coding and system tasks"
     base = (SYSTEM_PROMPT.rstrip()
             .replace("__OS_LABEL__", os_label)
-            .replace("__SHELL_LABEL__", shell_label))
+            .replace("__SHELL_LABEL__", shell_label)
+            .replace("__WORK_KIND__", work_kind))
     if kali_ctx:                             # Kali tool guidance on Linux, or when forced
         base += "\n" + KALI_NOTES
     env_note = ("# Environment\n"
@@ -454,7 +467,7 @@ def build_system(model=None):
                 "variable like $HOME, $env:USERPROFILE, or %USERPROFILE% in a tool path.")
     parts = [base, net, env_note]
     if model is not None:
-        parts.append(_identity_note(model))
+        parts.append(_identity_note(model, kali_ctx))
     return "\n\n".join(parts)
 
 # --------------------------------------------------------------------------- #

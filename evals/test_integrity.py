@@ -36,6 +36,11 @@ try:
     check("win: no Kali tool guidance", "You are on Kali Linux" not in win)
     check("win: env note says Windows", "Host OS: Windows" in win)
     check("win: shell is PowerShell", "PowerShell" in win)
+    check("win: no security framing (Kali-only)", "security" not in win.lower())
+    check("win: work line is plain coding", "coding and system tasks" in win)
+    check("win: identity is minimal/local (no dragon lore)",
+          "local model served by Ollama" in win and "dragon" not in win)
+    check("win: hedge ban present", 'in a lab setting' in win)
 
     RC._FORCE_KALI = True                         # simulate the Kali stick
     kali = RC.build_system("drago")
@@ -44,6 +49,8 @@ try:
     check("kali: shell is bash", "default shell: bash" in kali)
     check("kali: no PowerShell leakage", "PowerShell" not in kali)
     check("kali: nmap/toolkit guidance intact", "nmap" in kali and "apt install" in kali)
+    check("kali: keeps security framing", "security agent" in kali and "software and security" in kali)
+    check("kali: hedge ban present", 'in a lab setting' in kali)
 finally:
     RC._FORCE_KALI = _saved
 
