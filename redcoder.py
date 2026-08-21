@@ -72,6 +72,9 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
+import html as _htmllib
+from html.parser import HTMLParser
 import threading
 import queue as _queue
 
@@ -326,6 +329,7 @@ do NOT stop — take the next step instead. When it is truly complete, reply in 
 - glob        {"pattern": str}                               find files by glob (recursive)
 - grep        {"pattern": str, "path"?: str}                 regex search file contents
 - run_shell   {"command": str}                               run a __SHELL_LABEL__ command
+__WEB_TOOLS__
 
 # Rules
 - Plan first: in your head, name the goal and the smallest set of steps to reach it.
@@ -431,7 +435,18 @@ def build_system(model=None):
     """SYSTEM_PROMPT plus the current network mode and (if a model is given) an identity note,
     so the model knows its dragon name and what it actually is. Regenerated on model/mode
     changes and on /clear."""
-    if _NET_MODE == "sealed":
+    kali_ctx = (not IS_WINDOWS) or _FORCE_KALI
+    if not kali_ctx:
+        # This PC: single mode — full capability, online, no gating. The network is a
+        # first-class resource; look things up rather than guessing.
+        net = ("# Network & capability\n"
+               "You are ONLINE with full capability on the user's own machine — no airgap, no "
+               "restricted modes. Use the network freely whenever it helps: fetch pages, call "
+               "APIs, install packages. When you don't know something, aren't sure, or need "
+               "anything current, use web_search to find it and web_fetch to read a page — treat "
+               "the web like another file you can open. Don't ask permission to go online; just "
+               "do the task.")
+    elif _NET_MODE == "sealed":
         net = ("# Network access\n"
                "Airgapped mode: shell commands have NO network at all — not even a LAN. "
                "Any attempt to reach a host, the internet, or a lab target WILL fail. "
@@ -448,17 +463,23 @@ def build_system(model=None):
                f"unprivileged options first (e.g. `nmap -sT`) and only escalate when needed.")
     else:
         net = ("# Network access\n"
-               "ONLINE mode: shell commands can reach the network. Still prefer local "
-               "work — only go online when the task actually requires it.")
-    kali_ctx = (not IS_WINDOWS) or _FORCE_KALI
+               "ONLINE mode: shell commands can reach the network, and web_search / web_fetch "
+               "are available to look things up. Still prefer local work — only go online when "
+               "the task actually requires it.")
     os_label = "Kali Linux machine" if kali_ctx else "Windows PC"
     shell_label = "bash" if kali_ctx else "PowerShell"
     # Security framing belongs to Kali; on the user's own PC it's a plain local coding model.
     work_kind = "software and security tasks" if kali_ctx else "coding and system tasks"
+    # Web tools are available on this PC always, and on Kali only in online mode — advertise
+    # them only when usable so the model doesn't reach for a tool that will refuse.
+    web_on = (not kali_ctx) or (_NET_MODE == "online")
+    web_block = ('- web_search  {"query": str}                                 search the web (top results)\n'
+                 '- web_fetch   {"url": str}                                   fetch a URL as readable text')
     base = (SYSTEM_PROMPT.rstrip()
             .replace("__OS_LABEL__", os_label)
             .replace("__SHELL_LABEL__", shell_label)
-            .replace("__WORK_KIND__", work_kind))
+            .replace("__WORK_KIND__", work_kind)
+            .replace("\n__WEB_TOOLS__", ("\n" + web_block) if web_on else ""))
     if kali_ctx:                             # Kali tool guidance on Linux, or when forced
         base += "\n" + KALI_NOTES
     env_note = ("# Environment\n"
@@ -1279,6 +1300,187 @@ def t_run_shell(args, approve):
     return f"exit={proc.returncode}\n{out}"
 
 
+# --------------------------------------------------------------------------- #
+#  Web: search + fetch (stdlib only) — lets the model look up what it doesn't
+#  know, like Claude Code's WebSearch/WebFetch. On this PC it's always available;
+#  on Kali it follows the net mode (online only). Read-only GETs, no approval.
+# --------------------------------------------------------------------------- #
+_WEB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def _web_allowed():
+    """Web tools are always on for this PC; on Kali they follow the net mode."""
+    if IS_WINDOWS or _NET_MODE == "online":
+        return True, None
+    where = "airgapped" if _NET_MODE == "sealed" else "offline-lab"
+    return False, f"web access is off in {where} mode — run /net online first."
+
+
+def _http_get(url, timeout=20, max_bytes=800_000, data=None):
+    req = urllib.request.Request(url, data=data, headers={
+        "User-Agent": _WEB_UA,
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        ctype = r.headers.get("Content-Type", "")
+        raw = r.read(max_bytes)
+    charset = "utf-8"
+    m = re.search(r"charset=([\w-]+)", ctype)
+    if m:
+        charset = m.group(1)
+    return raw.decode(charset, "replace"), ctype
+
+
+class _TextExtractor(HTMLParser):
+    """Strip HTML to readable text: drop script/style, keep block breaks."""
+    _DROP = ("script", "style", "noscript", "svg", "head")
+    _BREAK = ("p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5",
+              "section", "article", "header", "footer", "ul", "ol")
+
+    def __init__(self):
+        super().__init__()
+        self._skip = 0
+        self.out = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._DROP:
+            self._skip += 1
+        elif tag in self._BREAK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._DROP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            t = data.strip()
+            if t:
+                self.out.append(t + " ")
+
+    def text(self):
+        s = "".join(self.out)
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\n[ \t]*(\n[ \t]*)+", "\n\n", s)
+        return s.strip()
+
+
+def t_web_fetch(args):
+    url = (args.get("url") or "").strip()
+    if not url:
+        raise ToolError("web_fetch needs a 'url'.")
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    ok, why = _web_allowed()
+    if not ok:
+        raise ToolError(why)
+    try:
+        body, ctype = _http_get(url)
+    except urllib.error.HTTPError as e:
+        raise ToolError(f"web_fetch: HTTP {e.code} {e.reason} for {url}")
+    except Exception as e:
+        raise ToolError(f"web_fetch: could not fetch {url}: {e}")
+    head = body[:2000].lower()
+    if "json" in ctype or url.rsplit("?", 1)[0].endswith((".json", ".txt", ".md", ".csv")):
+        text = body
+    elif "html" in ctype or "<html" in head or "<!doctype html" in head:
+        p = _TextExtractor()
+        try:
+            p.feed(body)
+        except Exception:
+            pass
+        text = p.text() or body
+    else:
+        text = body
+    cap = 8000
+    if len(text) > cap:
+        text = text[:cap] + f"\n\n… [truncated — {len(text)} chars total]"
+    return f"{url}\n\n{text}"
+
+
+def _ddg_unwrap(href):
+    """DDG wraps results as //duckduckgo.com/l/?uddg=<encoded target>; unwrap to the real URL."""
+    if "uddg=" in href:
+        try:
+            u = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg", [None])[0]
+            if u:
+                return urllib.parse.unquote(u)
+        except Exception:
+            pass
+    if href.startswith("//"):
+        return "https:" + href
+    return href
+
+
+class _DDGParser(HTMLParser):
+    """Pull result titles+urls and snippets out of html.duckduckgo.com/html/ results.
+    Titles/urls come from <a class="result__a">; snippets from class "result__snippet".
+    They're separate elements, so collect two ordered lists and zip them after."""
+    def __init__(self):
+        super().__init__()
+        self.links = []      # [{"title","url"}]
+        self.snips = []      # [str]
+        self._mode = None    # "title" | "snip"
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        cls = d.get("class", "") or ""
+        if tag == "a" and "result__a" in cls:
+            self.links.append({"title": "", "url": _ddg_unwrap(d.get("href", ""))})
+            self._mode = "title"
+        elif "result__snippet" in cls:
+            self.snips.append("")
+            self._mode = "snip"
+
+    def handle_endtag(self, tag):
+        if self._mode == "title" and tag == "a":
+            self._mode = None
+        elif self._mode == "snip" and tag in ("a", "div", "td", "span"):
+            self._mode = None
+
+    def handle_data(self, data):
+        if self._mode == "title" and self.links:
+            self.links[-1]["title"] += data
+        elif self._mode == "snip" and self.snips:
+            self.snips[-1] += data
+
+
+def t_web_search(args):
+    q = (args.get("query") or "").strip()
+    if not q:
+        raise ToolError("web_search needs a 'query'.")
+    ok, why = _web_allowed()
+    if not ok:
+        raise ToolError(why)
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q)
+    try:
+        body, _ = _http_get(url, timeout=20)
+    except Exception as e:
+        raise ToolError(f"web_search: request failed: {e}")
+    p = _DDGParser()
+    try:
+        p.feed(body)
+    except Exception:
+        pass
+    blocks = []
+    for i, ln in enumerate(p.links[:8]):
+        title = _htmllib.unescape(re.sub(r"\s+", " ", ln["title"]).strip())
+        url_i = ln["url"]
+        snip = _htmllib.unescape(re.sub(r"\s+", " ", p.snips[i]).strip()) if i < len(p.snips) else ""
+        if not title and not url_i:
+            continue
+        b = f"{len(blocks)+1}. {title}\n   {url_i}"
+        if snip:
+            b += f"\n   {snip}"
+        blocks.append(b)
+    if not blocks:
+        return (f"web_search '{q}': no results parsed (the engine may have blocked the request). "
+                f"Try web_fetch on a specific URL instead.")
+    return (f"web_search '{q}' — top {len(blocks)} results. "
+            f"Use web_fetch on a URL to read it in full:\n\n" + "\n\n".join(blocks))
+
+
 def run_tool(action, approve):
     name = action["name"]
     args = action["arguments"]
@@ -1296,6 +1498,10 @@ def run_tool(action, approve):
         return t_grep(args)
     if name == "run_shell":
         return t_run_shell(args, approve)
+    if name == "web_search":
+        return t_web_search(args)
+    if name == "web_fetch":
+        return t_web_fetch(args)
     raise ToolError(f"Unknown tool: {name}")
 
 
@@ -1314,6 +1520,10 @@ def summarize_action(action):
         return f"grep /{a.get('pattern')}/ in {a.get('path', '.')}"
     if n == "run_shell":
         return f"run_shell {a.get('command')}"
+    if n == "web_search":
+        return f"web_search {a.get('query')}"
+    if n == "web_fetch":
+        return f"web_fetch {a.get('url')}"
     return n
 
 
@@ -3040,6 +3250,10 @@ def main(argv):
             start_parts.append(a)
         i += 1
 
+    if IS_WINDOWS:
+        net_mode = "online"   # This PC is single-mode: full capability + online. The
+                              # airgap/lab/online gate is a Kali-only safety feature (it's
+                              # enforced with Linux network namespaces that don't exist here).
     _NET_MODE = net_mode
     _NO_SHELL = no_shell
     _NO_THINK = no_think
@@ -3115,23 +3329,23 @@ def main(argv):
     print(("  " + (green(status) if ok else yellow(status))) + "\n")
     _VOICE = (not no_voice) and voice_available()
     print(grey("  cwd: ") + blue(os.getcwd()))
-    if _NET_MODE == "lab":
-        ok, msg = activate_lab()
-        if not ok:
-            print(red("  lab mode unavailable: " + msg))
-            print(red("  falling back to Airgapped."))
-            _NET_MODE = "sealed"
-    if _NET_MODE == "sealed":
-        print(green("  Airgapped"))
-        if not IS_WINDOWS:
+    if not IS_WINDOWS:                       # network modes are a Kali feature; this PC is single-mode
+        if _NET_MODE == "lab":
+            ok, msg = activate_lab()
+            if not ok:
+                print(red("  lab mode unavailable: " + msg))
+                print(red("  falling back to Airgapped."))
+                _NET_MODE = "sealed"
+        if _NET_MODE == "sealed":
+            print(green("  Airgapped"))
             _, _, err = _net_prefix("sealed")
             if err:
                 print(red("  ⚠ no firejail/unshare found — shell commands will REFUSE "
                           "to run until one is installed (sudo apt install -y firejail)"))
-    elif _NET_MODE == "lab":
-        print(green("  Lab"))
-    else:
-        print(yellow("  Online"))
+        elif _NET_MODE == "lab":
+            print(green("  Lab"))
+        else:
+            print(yellow("  Online"))
     if os.path.exists(os.path.join(os.getcwd(), CHECKPOINT_FILE)):
         print(orange(f"  ⤶ {CHECKPOINT_FILE} — /resume" if w < 74
                      else f"  ⤶ found {CHECKPOINT_FILE} here — type /resume to pick up where a prior session left off"))
@@ -3208,6 +3422,10 @@ def main(argv):
                 approver.auto = not approver.auto
                 print(dim(f"  auto-approve {'ON' if approver.auto else 'OFF'}.")); continue
             if cmd == "net":
+                if IS_WINDOWS:
+                    print(dim("  this machine runs one mode: full capability, online. "
+                              "(network modes are a Kali-only feature.)"))
+                    continue
                 arg = rest.strip().lower()
                 if arg in ("", "status"):
                     if _NET_MODE == "sealed":

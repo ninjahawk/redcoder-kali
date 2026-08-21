@@ -145,5 +145,36 @@ for _seq in ("\x1b[A", "\x1b[B", "\x1b[5~", "\x1b[6~", "\x1bOA"):
           _seq.startswith("\x1b") and len(_seq) > 1)
     check(f"{_seq!r} would NOT append as text", not (_seq >= " "))   # ESC(0x1b) < space → never printable
 
+# ---- 8. WEB TOOLS + single-mode PC: web_search/web_fetch exist, dispatch, and are advertised
+#         only when usable. This PC is one mode (full-capability online, no airgap/lab gating);
+#         Kali keeps the gate (web tools hidden + refused in sealed/lab, available in online).
+print("\n[web] web tools registered; advertised & allowed only when usable; PC is single online mode")
+check("web tools dispatch in run_tool",
+      all(f'name == "{t}"' in __import__("inspect").getsource(RC.run_tool) for t in ("web_search", "web_fetch")))
+check("t_web_search / t_web_fetch defined", hasattr(RC, "t_web_search") and hasattr(RC, "t_web_fetch"))
+_sk, _nm = RC._FORCE_KALI, RC._NET_MODE
+try:
+    RC._FORCE_KALI = False; RC._NET_MODE = "online"          # this PC
+    pc = RC.build_system("drago")
+    check("PC prompt advertises web tools", "web_search" in pc and "web_fetch" in pc)
+    check("PC prompt has no airgap/lab modes", "Airgapped mode" not in pc and "LAB mode" not in pc)
+    check("PC prompt says full capability", "full capability" in pc)
+    RC._FORCE_KALI = True; RC._NET_MODE = "sealed"           # Kali airgapped
+    check("Kali sealed hides web tools", "web_search" not in RC.build_system("drago"))
+    RC._NET_MODE = "online"                                  # Kali online
+    check("Kali online shows web tools", "web_search" in RC.build_system("drago"))
+finally:
+    RC._FORCE_KALI = _sk; RC._NET_MODE = _nm
+_iw = RC.IS_WINDOWS                                          # gate follows platform + mode
+try:
+    RC.IS_WINDOWS = True
+    check("web allowed on the PC regardless of mode", RC._web_allowed()[0] is True)
+    RC.IS_WINDOWS = False; RC._NET_MODE = "sealed"
+    check("web blocked on Kali airgapped", RC._web_allowed()[0] is False)
+    RC._NET_MODE = "online"
+    check("web allowed on Kali online", RC._web_allowed()[0] is True)
+finally:
+    RC.IS_WINDOWS = _iw; RC._NET_MODE = _nm
+
 print(f"\n{'='*50}\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)
