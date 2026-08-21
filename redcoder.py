@@ -2901,7 +2901,8 @@ class LiveScreen:
     redirected sys.stdout; every frame positions each line by absolute coordinate, so cursor drift
     is impossible, and a single locked render() is the ONLY writer, so the thinking-spinner thread
     can't corrupt anything either. Always reset the terminal via exit()."""
-    BAR_H = 3
+    BAR_H = 3                      # minimum bar height (empty input): top + 1 input row + bottom
+    MAX_INPUT_ROWS = 6             # input area grows up to this many rows, then scrolls its tail
 
     def __init__(self, model):
         self.model = model
@@ -2925,7 +2926,28 @@ class LiveScreen:
         except Exception:
             cols, rows = 80, 24
         self.cols = max(24, cols); self.rows = max(8, rows)
-        self.view_h = max(1, self.rows - self.BAR_H - 1)     # reserve 1 blank row above the bar
+        n_input = len(self._input_wrap(self.cols)[0])        # input area grows with what's typed
+        self.bar_h = 2 + n_input                             # box: top border + input rows + bottom
+        self.view_h = max(1, self.rows - self.bar_h - 1)     # reserve 1 blank row above the bar
+
+    def _input_wrap(self, cols):
+        """Wrap self.buf across rows so long input flows down instead of scrolling sideways
+        (like Claude Code). Returns (rows, caret_row, caret_col): the visible input rows, and
+        where the caret sits within them. Text width inside the box is cols-6 ('│ › ' + ' │').
+        Shows at most MAX_INPUT_ROWS — the tail — so a huge paste can't eat the whole screen."""
+        inner = max(1, cols - 6)
+        buf = self.buf
+        if not buf:
+            return [""], 0, 0
+        rows = [buf[i:i + inner] for i in range(0, len(buf), inner)]
+        if len(buf) % inner == 0:            # last line is exactly full → caret drops to a fresh row
+            rows.append("")
+        caret_row, caret_col = len(rows) - 1, len(rows[-1])
+        if len(rows) > self.MAX_INPUT_ROWS:  # keep the caret visible: show the tail rows
+            start = len(rows) - self.MAX_INPUT_ROWS
+            rows = rows[start:]
+            caret_row -= start
+        return rows, caret_row, caret_col
 
     # ── lifecycle ───────────────────────────────────────────────────────────────────────
     def enter(self):
@@ -3086,14 +3108,16 @@ class LiveScreen:
                   + grey("─" * max(0, cols - len(label) - 1) + "╮")
         else:
             top = grey("╭─ " + "─" * max(0, cols - 4) + "╮")
-        inner = max(1, cols - 4)
-        shown = self.buf[-inner:] if len(self.buf) > inner else self.buf
-        mid = grey("│ ") + green("› ") + shown + " " * max(0, inner - len(shown) - 2) + grey(" │")
+        rows, caret_row, caret_col = self._input_wrap(cols)
+        out = [f"\x1b[{r};1H\x1b[2K" + top]
+        for i, seg in enumerate(rows):
+            marker = green("› ") if i == 0 else "  "         # prompt only on row 0; wraps align under it
+            pad = max(0, cols - 6 - len(seg))                # "│ "(2)+"› "(2)+seg+pad+" │"(2) = cols
+            out.append(f"\x1b[{r+1+i};1H\x1b[2K" + grey("│ ") + marker + seg + " " * pad + grey(" │"))
         bot = grey("╰" + "─" * max(0, cols - 2) + "╯")
-        return [f"\x1b[{r};1H\x1b[2K" + top,
-                f"\x1b[{r+1};1H\x1b[2K" + mid,
-                f"\x1b[{r+2};1H\x1b[2K" + bot,
-                f"\x1b[{r+1};{4 + len(shown) + 1}H"]         # park cursor in the input line
+        out.append(f"\x1b[{r+1+len(rows)};1H\x1b[2K" + bot)
+        out.append(f"\x1b[{r+1+caret_row};{5 + caret_col}H")  # park caret: text starts at column 5
+        return out
 
     def confirm(self, description, danger=False):
         """In-frame approval: render the permission text into the buffer, then read ONE keypress at
