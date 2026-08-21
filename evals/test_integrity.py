@@ -39,8 +39,8 @@ try:
     check("win: no security framing (Kali-only)", "security" not in win.lower())
     check("win: work line is plain coding", "coding and system tasks" in win)
     _base = RC.resolve_model("drago").split("/")[-1]   # the underlying ollama ref it reports
-    check("win: identity keeps Redcoder + model + dragon brand",
-          "Redcoder is the harness" in win and _base in win and "dragon" in win)
+    check("win: identity keeps Redcoder + model brand",
+          "Redcoder is the harness" in win and _base in win and "one of Redcoder's models" in win)
     check("win: identity says reliable/obeys, not security agent",
           "does exactly what the user asks" in win and "security agent" not in win)
     check("win: hedge ban present", 'in a lab setting' in win)
